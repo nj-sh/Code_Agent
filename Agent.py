@@ -1,9 +1,9 @@
 
 #!/usr/bin/env python3
 """
-CODEX v3.1 — Terminal AI Assistant (Fixed)
+CODEX v3.2 — Terminal AI Assistant
+Ctrl+C interrupts commands only — never exits the script.
 Direct ops: list, mkdir, cd + plain-text command detection
-Fixes: success detection, duplicate thinking blocks, false error messages
 """
 
 import os, json, re, subprocess, sys, time, threading, signal, random
@@ -57,13 +57,16 @@ class OllamaClient:
                         full += c; sys.stdout.write(c); sys.stdout.flush()
                 if got: print()
                 return True, full
+            except KeyboardInterrupt:
+                sp.stop()
+                print(f"\n  {C.YELLOW}⛔ LLM cancelled{C.RESET}")
+                return False, full
             except Exception as e:
                 if a < 2: sp.stop(); time.sleep(1)
                 else: sp.stop(); print(f"\n{C.RED}✗ Ollama unreachable{C.RESET}"); return False, ""
         if not got: sp.stop()
         return got, full
 
-# ─── Known simple commands (run directly, no LLM) ────────────
 SIMPLE_CMDS = {
     "list": "ls",
     "list files": "ls -la",
@@ -80,7 +83,6 @@ SIMPLE_CMDS = {
     "help": "echo 'Commands: list, pwd, date, cd <path>, mkdir <name>, make a folder <name>'",
 }
 
-# ─── Plain command detector (for LLM output without backticks) ──
 SHELL_CMDS = {"ls","cd","mkdir","pwd","date","whoami","echo","cat","touch","rm","cp","mv",
               "grep","find","sort","head","tail","wc","chmod","chown","ps","top","kill",
               "df","du","free","uname","which","whereis","apt","pip","npm","git","docker"}
@@ -205,9 +207,6 @@ class CodexAgent:
             print(f"  {C.RED}❌ {e}{C.RESET}")
             return False
 
-    # ═══════════════════════════════════════════════════════════════
-    # FIX #1: `success` is now properly set from returncode
-    # ═══════════════════════════════════════════════════════════════
     def run_cmd(self, cmd):
         t0 = time.time(); out=""; success=False; cancelled=False; ec = -1
         try:
@@ -215,10 +214,8 @@ class CodexAgent:
                 stderr=subprocess.STDOUT, text=True, cwd=self.cwd, preexec_fn=os.setsid)
             try:
                 out,_ = self._running_proc.communicate(timeout=COMMAND_TIMEOUT)
-                # FIX: Capture returncode and set success BEFORE finally block clears it
                 ec = self._running_proc.returncode
-                if ec == 0:
-                    success = True
+                if ec == 0: success = True
             except subprocess.TimeoutExpired:
                 os.killpg(os.getpgid(self._running_proc.pid), signal.SIGKILL)
                 out = "⏱ timeout"; ec = -1
@@ -232,7 +229,6 @@ class CodexAgent:
         duration = time.time() - t0
         r = CmdResult(success, out.strip(), ec, duration, cmd)
         self.log.append(r)
-        # FIX: Show ✓ for success, ✗ for failure (was always ✗ before)
         if success:
             mark = f"{C.GREEN}✓{C.RESET}"
         elif cancelled:
@@ -249,11 +245,7 @@ class CodexAgent:
                 print(f"    {C.DIM}(dir may already exist){C.RESET}")
         return r, cancelled
 
-    # ═══════════════════════════════════════════════════════════════
-    # FIX #2: No duplicate "thinking" block for initial response
-    # ═══════════════════════════════════════════════════════════════
     def send_with_think(self, prompt_text):
-        """Send to LLM and show response. Used for retries only."""
         print(f"\n{C.THINK}┌─ thinking ─────────────────────{C.RESET}")
         self.history.append({"role":"user","content":prompt_text})
         ok, resp = self.client.chat(self.history)
@@ -273,9 +265,6 @@ class CodexAgent:
             if kw in rl and not needs_git: return True, f"Credential request '{kw}' unrelated"
         return False, None
 
-    # ═══════════════════════════════════════════════════════════════
-    # FIX #3: Clean auto-cycle — no false retries on success
-    # ═══════════════════════════════════════════════════════════════
     def run_auto_cycle(self, resp, task=""):
         attempts = 0; max_auto = 3; last = ""
         for loop in range(10):
@@ -285,7 +274,7 @@ class CodexAgent:
                     print(f"  {C.YELLOW}❌ Repeating {attempts+1}x — resetting{C.RESET}")
                     if len(self.history) >= 2: self.history.pop()
                     resp = self.send_with_think(
-                        f"Stop repeating. Task: {task[:100]}. Try different approach.")
+                        f"Stop repeating. Task: {task[:100]}. Try a different approach.")
                     if not resp: return; attempts = 0; last = ""; continue
             last = resp
             is_h, reason = self.is_hallucinating(resp, task)
@@ -351,72 +340,85 @@ class CodexAgent:
             if len(self.history) > MAX_HISTORY:
                 self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
 
+    # ═══════════════════════════════════════════════════════════
+    # FIX: Ctrl+C anywhere → cancels current op, shows new prompt
+    # ═══════════════════════════════════════════════════════════
     def run(self):
         os.system("clear")
         print(f"{C.BOLD}{C.CYAN}╔════════════════════════╗")
-        print(f"║   ⚡ CODEX v3.1 AI   ║")
+        print(f"║   ⚡ CODEX v3.2 AI   ║")
         print(f"╚════════════════════════╝{C.RESET}")
         print(f"  {C.YELLOW}{MODEL_NAME}{C.RESET}")
         print(f"  {C.GRAY}Direct: list, cd, mkdir, make a folder{C.RESET}")
-        print(f"  {C.GRAY}:auto  :manual  exit{C.RESET}")
+        print(f"  {C.GRAY}:auto  :manual  exit  Ctrl+C = interrupt only{C.RESET}")
         print(f"{C.CYAN}{'─'*50}{C.RESET}")
         while True:
-            try: inp = input(self.prompt_str()).strip()
-            except (KeyboardInterrupt, EOFError): print(f"\n{C.CYAN}👋{C.RESET}"); break
-            if not inp: continue
-            if inp.lower() == "exit": break
-            if inp.lower() in (":auto",":a"):
-                self.mode="auto"; self._rebuild(); print(f"  {C.GREEN}⚡ Auto{C.RESET}"); continue
-            if inp.lower() in (":manual",":m"):
-                self.mode="manual"; self._rebuild(); print(f"  {C.YELLOW}🔒 Manual{C.RESET}"); continue
+            try:
+                # ── Wrapped in try/except so Ctrl+C never exits ──
+                try:
+                    inp = input(self.prompt_str()).strip()
+                except (KeyboardInterrupt, EOFError):
+                    # FIX: Ctrl+C at prompt → just show a new prompt, don't exit
+                    print()
+                    continue
+                if not inp: continue
+                if inp.lower() == "exit": break
+                if inp.lower() in (":auto",":a"):
+                    self.mode="auto"; self._rebuild(); print(f"  {C.GREEN}⚡ Auto{C.RESET}"); continue
+                if inp.lower() in (":manual",":m"):
+                    self.mode="manual"; self._rebuild(); print(f"  {C.YELLOW}🔒 Manual{C.RESET}"); continue
 
-            cls = self.cls.classify(inp)
-            if self._awaiting:
-                self._awaiting = False
+                cls = self.cls.classify(inp)
+                if self._awaiting:
+                    self._awaiting = False
+                    self.history.append({"role":"user","content":inp})
+                    ok, resp = self.client.chat(self.history)
+                    if ok:
+                        self.history.append({"role":"assistant","content":resp})
+                        if self.mode == "auto": self.run_auto_cycle(resp, inp)
+                    continue
+                if self._pending:
+                    if cls == "affirm":
+                        for c in self._pending:
+                            cd_m = re.match(r'^cd\s+(.+)$', c)
+                            if cd_m: self.do_cd(cd_m.group(1))
+                            else: self.run_cmd(c)
+                        self._pending = None; continue
+                    elif cls == "reject": self._pending = None; continue
+                if cls == "greeting": self.handle_greeting(); continue
+                if cls == "anger": self.handle_anger(); continue
+                if cls == "cd_cmd": self.do_cd(inp[3:].strip()); continue
+                if cls == "question": self.handle_question(inp); continue
+                if cls == "simple_cmd":
+                    self.run_cmd(SIMPLE_CMDS[inp.lower()]); continue
+                if cls == "direct_op":
+                    m = re.match(r'mk(?:dir)?\s+(.+)$', inp)
+                    if not m: m = re.match(r'(?:make|create)\s+(?:a\s+)?(?:folder|dir|directory)\s+(.+)$', inp)
+                    if m: self.do_mkdir(m.group(1)); continue
+
+                # ── LLM route ──
                 self.history.append({"role":"user","content":inp})
                 ok, resp = self.client.chat(self.history)
-                if ok:
-                    self.history.append({"role":"assistant","content":resp})
-                    if self.mode == "auto": self.run_auto_cycle(resp, inp)
+                if not ok: self.history.pop(); continue
+                if self.mode == "auto":
+                    self.run_auto_cycle(resp, inp)
+                else:
+                    cmds = self.extract_cmds(resp)
+                    if cmds:
+                        print(f"\n  {C.YELLOW}❓ Run {len(cmds)} command(s)? (yes/no){C.RESET}")
+                        self._pending = cmds
+                self.history.append({"role":"assistant","content":resp})
+                if len(self.history) > MAX_HISTORY:
+                    self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
+
+            except KeyboardInterrupt:
+                # FIX: Ctrl+C during any operation → cancel, re-prompt
+                # Kill any running process
+                if self._running_proc and self._running_proc.poll() is None:
+                    try: os.killpg(os.getpgid(self._running_proc.pid), signal.SIGKILL)
+                    except: self._running_proc.kill()
+                print(f"\n  {C.YELLOW}⛔ Interrupted{C.RESET}")
                 continue
-            if self._pending:
-                if cls == "affirm":
-                    for c in self._pending:
-                        cd_m = re.match(r'^cd\s+(.+)$', c)
-                        if cd_m: self.do_cd(cd_m.group(1))
-                        else: self.run_cmd(c)
-                    self._pending = None; continue
-                elif cls == "reject": self._pending = None; continue
-            if cls == "greeting": self.handle_greeting(); continue
-            if cls == "anger": self.handle_anger(); continue
-            if cls == "cd_cmd": self.do_cd(inp[3:].strip()); continue
-            if cls == "question": self.handle_question(inp); continue
-
-            # ── Simple commands (list, pwd, date) — no LLM ──
-            if cls == "simple_cmd":
-                self.run_cmd(SIMPLE_CMDS[inp.lower()]); continue
-
-            # ── Direct mkdir ──
-            if cls == "direct_op":
-                m = re.match(r'mk(?:dir)?\s+(.+)$', inp)
-                if not m: m = re.match(r'(?:make|create)\s+(?:a\s+)?(?:folder|dir|directory)\s+(.+)$', inp)
-                if m: self.do_mkdir(m.group(1)); continue
-
-            # ── LLM ──
-            # FIX: Pass to LLM — no duplicate thinking wrapper here
-            self.history.append({"role":"user","content":inp})
-            ok, resp = self.client.chat(self.history)
-            if not ok: self.history.pop(); continue
-            if self.mode == "auto":
-                self.run_auto_cycle(resp, inp)
-            else:
-                cmds = self.extract_cmds(resp)
-                if cmds:
-                    print(f"\n  {C.YELLOW}❓ Run {len(cmds)} command(s)? (yes/no){C.RESET}")
-                    self._pending = cmds
-            self.history.append({"role":"assistant","content":resp})
-            if len(self.history) > MAX_HISTORY:
-                self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
 
 if __name__ == "__main__":
     CodexAgent().run()
