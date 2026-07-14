@@ -1,17 +1,54 @@
-
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-CODEX v3.2 — Terminal AI Assistant
-Ctrl+C interrupts commands only — never exits the script.
-Direct ops: list, mkdir, cd + plain-text command detection
+CODEX v3.2 + Nebula Memory — Merged Terminal AI Assistant
+- Persistent memory via memory.json (model, prompt, conversation history)
+- Ctrl+C interrupts commands only — never exits the script.
+- Direct ops: list, mkdir, cd + plain-text command detection
 """
 
 import os, json, re, subprocess, sys, time, threading, signal, random
 import urllib.request, urllib.error
 from dataclasses import dataclass
 
+# ──────────────────────────────────────────────
+# Persistent Memory (from Nebula v0.1)
+# ──────────────────────────────────────────────
+MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
+
+def load_memory():
+    """Load memory.json, creating default if missing."""
+    defaults = {
+        "model": "qwen2.5-coder:1.5b",
+        "prompt": "You are CODEX — a terminal AI assistant like GitHub Copilot.",
+        "last_user": "",
+        "last_response": "",
+        "history": []
+    }
+    try:
+        with open(MEMORY_FILE, "r") as f:
+            mem = json.load(f)
+            # Ensure all keys exist
+            for k, v in defaults.items():
+                mem.setdefault(k, v)
+            return mem
+    except (FileNotFoundError, json.JSONDecodeError):
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(defaults, f, indent=4)
+        return defaults
+
+def save_memory(memory):
+    """Write memory.json atomically."""
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(memory, f, indent=4)
+
+memory = load_memory()
+
+# ──────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "qwen2.5-coder:1.5b"
+MODEL_NAME = memory.get("model", "qwen2.5-coder:1.5b")
 COMMAND_TIMEOUT = 60
 MAX_HISTORY = 50
 HOME = os.path.expanduser("~")
@@ -108,15 +145,23 @@ class InputClassifier:
         if re.match(r'(?:make|create)\s+(?:a\s+)?(?:folder|dir|directory)\s+', t): return "direct_op"
         return "command"
 
-SYS = """You are CODEX — a terminal AI assistant like GitHub Copilot.
+SYS = memory.get("prompt", "") or """You are CODEX — an action-oriented terminal AI agent. You run commands for the user.
+
+CORE BEHAVIOR:
+- Frame everything as actions YOU are taking: "Let me..." or "I will..."
+- NEVER say "you can run", "you could try", "you might want to" — YOU execute commands
+- NEVER apologize or say "I'm an AI", "I'm text-based", "I cannot do that" — just try another way
+- NEVER output text without a ```bash block — every response must include runnable commands
+- Keep anything before code to 1 short sentence max (e.g. "Let me check." or "Let me look at that.")
+- When a command FAILS → read the error and try a different approach immediately
+- When a command SUCCEEDS → just say "Done." and move on, no lengthy confirmations
+- Think step by step. Output one command at a time for multi-step tasks.
 
 RULES:
-1. When a command FAILS — read the error, try a different approach.
-2. When a command SUCCEEDS — confirm briefly and move on. Do NOT re-suggest the same command.
-3. NEVER ask for credentials (GitHub, email, password) unless task is about git.
-4. You get 3 attempts total, then explain problem to user and ask for help.
-5. Output ```bash blocks for commands. One sentence explanation max.
-6. mkdir, cd, and simple commands are handled by the script automatically."""
+1. Output complete, runnable bash commands — NO placeholders like <filename>
+2. NEVER ask for credentials unless the task is explicitly about git auth
+3. You get 3 attempts per command, then explain the problem briefly and ask for help
+4. mkdir, cd, and simple list commands are handled by the script directly — focus on everything else"""
 
 def prompt(cwd, mode):
     return f"{SYS}\n\nDIR: {cwd}\nMODE: {mode.upper()}\n"
@@ -127,11 +172,23 @@ class CodexAgent:
         self.client = OllamaClient(OLLAMA_URL, MODEL_NAME)
         self.log = []; self.mode = "auto"; self._pending = None
         self._running_proc = None; self._awaiting = False
+        # ── Load previous history from persistent memory ──
+        saved_history = memory.get("history", [])
         self.history = [{"role":"system","content":prompt(self.cwd,self.mode)}]
+        for msg in saved_history[-MAX_HISTORY:]:
+            if msg.get("role") in ("user", "assistant"):
+                self.history.append(msg)
         self.cls = InputClassifier()
 
     def _rebuild(self):
         self.history[0] = {"role":"system","content":prompt(self.cwd,self.mode)}
+
+    def _save_memory_now(self):
+        """Persist current state to memory.json."""
+        memory["history"] = [m for m in self.history[1:] if m["role"] in ("user","assistant")][-MAX_HISTORY:]
+        memory["model"] = MODEL_NAME
+        memory["prompt"] = SYS
+        save_memory(memory)
 
     def estimate_tokens(self):
         return int(sum(len(m["content"].split()) for m in self.history) / 0.75)
@@ -142,17 +199,33 @@ class CodexAgent:
         return f"{C.CYAN}{p}{C.RESET} {C.TOKEN}[{t}t]{C.RESET} {tag} {C.GREEN}❯{C.RESET} "
 
     def extract_cmds(self, text):
+        """Aggressively extract runnable commands from AI response."""
         cmds = []
+        seen = set()
+        # 1. Extract from ```code blocks
         for lang, code in re.findall(r'```(\w+)?\s*([\s\S]*?)```', text):
             code = code.strip()
-            if not code or lang.lower() not in ("bash","sh","shell",""): continue
+            if lang.lower() not in ("bash","sh","shell","cmd","powershell",""): continue
             for line in code.split("\n"):
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    cmds.append(line)
+                line = line.strip().lstrip("$ ")  # strip shell prompt prefix
+                if line and not line.startswith("#") and not line.startswith("//"):
+                    if line not in seen:
+                        seen.add(line)
+                        cmds.append(line)
+        # 2. Extract from inline backticks: `command`
         if not cmds:
-            t = text.strip()
-            if t and not t.startswith("#") and "\n" not in t:
+            for match in re.findall(r'`([^`]+)`', text):
+                cmd = match.strip().lstrip("$ ")
+                if cmd and not cmd.startswith("#"):
+                    first = cmd.split()[0].lower() if cmd.split() else ""
+                    if first in SHELL_CMDS or first.startswith("./") or first.startswith("/"):
+                        if cmd not in seen:
+                            seen.add(cmd)
+                            cmds.append(cmd)
+        # 3. Fallback: single line that looks like a command
+        if not cmds:
+            t = text.strip().lstrip("$ ")
+            if t and "\n" not in t:
                 first = t.split()[0].lower() if t.split() else ""
                 if first in SHELL_CMDS or first.startswith("./") or first.startswith("/"):
                     cmds.append(t)
@@ -254,6 +327,10 @@ class CodexAgent:
             self.history.append({"role":"assistant","content":resp})
             if len(self.history) > MAX_HISTORY:
                 self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
+            # ── Persist after each AI response ──
+            memory["last_user"] = prompt_text
+            memory["last_response"] = resp
+            self._save_memory_now()
             return resp
         return None
 
@@ -285,9 +362,19 @@ class CodexAgent:
                 if not resp: return; continue
             cmds = self.extract_cmds(resp)
             if not cmds:
-                if any(q in resp.lower() for q in ["what is","i need","please provide","tell me","enter your"]):
+                rl = resp.lower()
+                if any(q in rl for q in ["what is","i need","please provide","tell me","enter your","provide"]):
                     self._awaiting = True
                     print(f"\n  {C.BLUE}💬 [Codex needs your input]{C.RESET}")
+                    return
+                # If response has no commands and isn't asking for input — force it
+                if not any(apology in rl for apology in ["sorry","can't","cannot","i'm an ai","text based"]):
+                    print(f"  {C.YELLOW}⚠️ No commands in response — re-prompting{C.RESET}")
+                    if len(self.history) >= 2: self.history.pop()
+                    resp = self.send_with_think(
+                        f"Output actual bash commands in ```bash blocks. No explanations. Task: {task[:100]}")
+                    if not resp: return
+                    continue
                 return
             all_ok = True
             for c in cmds:
@@ -333,36 +420,43 @@ class CodexAgent:
     def handle_anger(self):
         print(f"  {C.YELLOW}Sorry, what's wrong?{C.RESET}")
     def handle_question(self, inp):
-        self.history.append({"role":"user","content":f"Answer briefly: {inp}"})
+        self.history.append({"role":"user","content":f"Answer briefly with bash commands if applicable: {inp}"})
         ok, resp = self.client.chat(self.history)
         if ok:
             self.history.append({"role":"assistant","content":resp})
             if len(self.history) > MAX_HISTORY:
                 self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
+            # ── Persist ──
+            memory["last_user"] = inp
+            memory["last_response"] = resp
+            self._save_memory_now()
 
-    # ═══════════════════════════════════════════════════════════
-    # FIX: Ctrl+C anywhere → cancels current op, shows new prompt
-    # ═══════════════════════════════════════════════════════════
     def run(self):
-        os.system("clear")
+        os.system("cls" if os.name == "nt" else "clear")
         print(f"{C.BOLD}{C.CYAN}╔════════════════════════╗")
         print(f"║   ⚡ CODEX v3.2 AI   ║")
         print(f"╚════════════════════════╝{C.RESET}")
         print(f"  {C.YELLOW}{MODEL_NAME}{C.RESET}")
         print(f"  {C.GRAY}Direct: list, cd, mkdir, make a folder{C.RESET}")
         print(f"  {C.GRAY}:auto  :manual  exit  Ctrl+C = interrupt only{C.RESET}")
+        print(f"  {C.GRAY}💾 Persistent memory: {MEMORY_FILE}{C.RESET}")
+        # Show last conversation if available
+        if memory.get("last_user"):
+            print(f"  {C.DIM}Last: {memory['last_user'][:50]}{C.RESET}")
         print(f"{C.CYAN}{'─'*50}{C.RESET}")
         while True:
             try:
-                # ── Wrapped in try/except so Ctrl+C never exits ──
                 try:
                     inp = input(self.prompt_str()).strip()
                 except (KeyboardInterrupt, EOFError):
-                    # FIX: Ctrl+C at prompt → just show a new prompt, don't exit
                     print()
                     continue
                 if not inp: continue
-                if inp.lower() == "exit": break
+                if inp.lower() == "exit":
+                    # ── Save memory on exit ──
+                    self._save_memory_now()
+                    print(f"  {C.GREEN}👋 Bye! Memory saved.{C.RESET}")
+                    break
                 if inp.lower() in (":auto",":a"):
                     self.mode="auto"; self._rebuild(); print(f"  {C.GREEN}⚡ Auto{C.RESET}"); continue
                 if inp.lower() in (":manual",":m"):
@@ -375,6 +469,9 @@ class CodexAgent:
                     ok, resp = self.client.chat(self.history)
                     if ok:
                         self.history.append({"role":"assistant","content":resp})
+                        memory["last_user"] = inp
+                        memory["last_response"] = resp
+                        self._save_memory_now()
                         if self.mode == "auto": self.run_auto_cycle(resp, inp)
                     continue
                 if self._pending:
@@ -410,10 +507,12 @@ class CodexAgent:
                 self.history.append({"role":"assistant","content":resp})
                 if len(self.history) > MAX_HISTORY:
                     self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
+                # ── Persist after LLM response ──
+                memory["last_user"] = inp
+                memory["last_response"] = resp
+                self._save_memory_now()
 
             except KeyboardInterrupt:
-                # FIX: Ctrl+C during any operation → cancel, re-prompt
-                # Kill any running process
                 if self._running_proc and self._running_proc.poll() is None:
                     try: os.killpg(os.getpgid(self._running_proc.pid), signal.SIGKILL)
                     except: self._running_proc.kill()
