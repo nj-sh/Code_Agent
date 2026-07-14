@@ -1,0 +1,10 @@
+# ⚡ Code Agent — Ollama CLI Coding Agent
+#
+# This project uses ONLY Python standard library modules.
+# No pip dependencies are needed.
+#
+# External requirements:
+#   - Ollama (https://ollama.com/) running on localhost:11434
+#   - A coder model pulled via `ollama pull qwen2.5-coder:1.5b`
+#
+# Python: 3.8+

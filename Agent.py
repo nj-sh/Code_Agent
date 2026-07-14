@@ -1,523 +1,885 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-CODEX v3.2 + Nebula Memory — Merged Terminal AI Assistant
-- Persistent memory via memory.json (model, prompt, conversation history)
-- Ctrl+C interrupts commands only — never exits the script.
-- Direct ops: list, mkdir, cd + plain-text command detection
+╔══════════════════════════════════════════════════╗
+║          ⚡ Code Agent v4 — Ollama CLI          ║
+╚══════════════════════════════════════════════════╝
+
+A lightweight, local-first coding agent powered by Ollama models.
+Inspired by Codex CLI & Claude Code — purpose-built for private,
+offline AI-assisted development on modest hardware.
+
+Key Features:
+  • Plan → Execute → Summarize workflow
+  • Tool-based execution (think, bash, read, write, edit, search)
+  • Structured terminal UI with clear visual hierarchy
+  • Optimized prompts for small Ollama models (1.5B–7B)
+  • Auto-retry with intelligent error recovery
+  • Persistent session memory across restarts
+
+Recommended lightweight models:
+  • qwen2.5-coder:1.5b  — fast, ~1GB VRAM (default)
+  • deepseek-coder:1.3b  — very fast, ~800MB VRAM
+  • stable-code:3b       — good balance, ~1.8GB VRAM
+  • codegemma:2b         — Google's lightweight coder
+  • qwen2.5-coder:7b     — smarter but heavier, ~4GB VRAM
 """
 
-import os, json, re, subprocess, sys, time, threading, signal, random
-import urllib.request, urllib.error
-from dataclasses import dataclass
+import os
+import json
+import re
+import subprocess
+import sys
+import time
+import threading
+import signal
+import textwrap
+import shutil
+import urllib.request
+import urllib.error
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
 
-# ──────────────────────────────────────────────
-# Persistent Memory (from Nebula v0.1)
-# ──────────────────────────────────────────────
-MEMORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
+# ─── Configuration ────────────────────────────────────────────────────────────
 
-def load_memory():
-    """Load memory.json, creating default if missing."""
+MEMORY_FILE = Path(__file__).parent / "memory.json"
+OLLAMA_URL = "http://localhost:11434/api/chat"
+DEFAULT_MODEL = "qwen2.5-coder:1.5b"
+COMMAND_TIMEOUT = 120
+MAX_HISTORY = 80
+HOME = os.path.expanduser("~")
+VERSION = "4.0"
+
+# ─── Terminal Colors ──────────────────────────────────────────────────────────
+
+
+class Color:
+    """ANSI color codes for structured terminal output."""
+    CYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    RED = "\033[91m"
+    GRAY = "\033[90m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+    ITALIC = "\033[3m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    THINK = "\033[38;5;245m"
+    TOKEN = "\033[38;5;221m"
+    LINE = "\033[38;5;236m"
+
+
+C = Color  # shorthand
+
+# ─── Data Classes ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ToolResult:
+    """Result from executing a single tool call."""
+    success: bool
+    output: str
+    duration: float
+    tool: str
+    args: dict = field(default_factory=dict)
+    cancelled: bool = False
+
+
+# ─── Memory (Persistent State) ────────────────────────────────────────────────
+
+
+def load_memory() -> dict:
+    """Load or create persistent memory file."""
     defaults = {
-        "model": "qwen2.5-coder:1.5b",
-        "prompt": "You are CODEX — a terminal AI assistant like GitHub Copilot.",
-        "last_user": "",
-        "last_response": "",
-        "history": []
+        "model": DEFAULT_MODEL,
+        "system_prompt": "",
+        "last_task": "",
+        "last_summary": "",
+        "history": [],
     }
     try:
-        with open(MEMORY_FILE, "r") as f:
+        with open(MEMORY_FILE) as f:
             mem = json.load(f)
-            # Ensure all keys exist
-            for k, v in defaults.items():
-                mem.setdefault(k, v)
-            return mem
+        for k, v in defaults.items():
+            mem.setdefault(k, v)
+        return mem
     except (FileNotFoundError, json.JSONDecodeError):
         with open(MEMORY_FILE, "w") as f:
-            json.dump(defaults, f, indent=4)
-        return defaults
+            json.dump(defaults, f, indent=2)
+        return dict(defaults)
 
-def save_memory(memory):
-    """Write memory.json atomically."""
+
+def save_memory(memory: dict) -> None:
+    """Persist memory to disk."""
     with open(MEMORY_FILE, "w") as f:
-        json.dump(memory, f, indent=4)
+        json.dump(memory, f, indent=2)
+
 
 memory = load_memory()
 
-# ──────────────────────────────────────────────
-# Configuration
-# ──────────────────────────────────────────────
-OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = memory.get("model", "qwen2.5-coder:1.5b")
-COMMAND_TIMEOUT = 60
-MAX_HISTORY = 50
-HOME = os.path.expanduser("~")
+# ─── Spinner ──────────────────────────────────────────────────────────────────
 
-class C:
-    CYAN = "\033[96m"; GREEN = "\033[92m"; YELLOW = "\033[93m"
-    RED = "\033[91m"; GRAY = "\033[90m"; BOLD = "\033[1m"
-    RESET = "\033[0m"; DIM = "\033[2m"; TOKEN = "\033[38;5;221m"
-    THINK = "\033[38;5;245m"; BLUE = "\033[94m"
-
-@dataclass
-class CmdResult:
-    success: bool; output: str; exit_code: int; duration: float; command: str
 
 class Spinner:
-    def __init__(self): self._r = False; self._t = None
-    def start(self):
-        self._r = True; self._t = threading.Thread(target=self._spin, daemon=True); self._t.start()
-    def _spin(self):
-        ch = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; i = 0
-        while self._r:
-            sys.stdout.write(f"\r{ch[i]} "); sys.stdout.flush(); i = (i+1)%len(ch); time.sleep(0.1)
-    def stop(self):
-        self._r = False
-        if self._t: self._t.join(timeout=0.5)
-        sys.stdout.write("\r"+" "*30+"\r"); sys.stdout.flush()
+    """Minimal async spinner for LLM wait states."""
+
+    def __init__(self, text: str = "thinking"):
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._text = text
+
+    def start(self) -> None:
+        self._running = True
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def _spin(self) -> None:
+        chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        i = 0
+        while self._running:
+            sys.stdout.write(f"\r{C.THINK}{chars[i]} {self._text}...{C.RESET}")
+            sys.stdout.flush()
+            i = (i + 1) % len(chars)
+            time.sleep(0.08)
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=0.5)
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        sys.stdout.flush()
+
+# ─── Ollama Client ────────────────────────────────────────────────────────────
+
 
 class OllamaClient:
-    def __init__(self, url, model): self.url, self.model = url, model
-    def chat(self, messages):
-        data = json.dumps({"model":self.model,"messages":messages,"stream":True,
-                           "options":{"temperature":0.1}}).encode()
-        req = urllib.request.Request(self.url, data=data, headers={"Content-Type":"application/json"})
-        full = ""; sp = Spinner(); sp.start(); got = False
-        for a in range(3):
+    """Streaming client for local Ollama API."""
+
+    def __init__(self, url: str = OLLAMA_URL, model: str = DEFAULT_MODEL):
+        self.url = url
+        self.model = model
+
+    def chat(self, messages: list, temperature: float = 0.1) -> tuple[bool, str]:
+        """Send a chat request and return (success, full_response_text)."""
+        data = json.dumps({
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": temperature},
+        }).encode()
+
+        req = urllib.request.Request(
+            self.url, data=data,
+            headers={"Content-Type": "application/json"}
+        )
+
+        full = ""
+        spinner = Spinner("thinking")
+        spinner.start()
+        started = False
+
+        for attempt in range(3):
             try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=180) as resp:
                     for line in resp:
-                        try: c = json.loads(line.decode())["message"]["content"]
-                        except: continue
-                        if not c: continue
-                        if not got: got = True; sp.stop()
-                        full += c; sys.stdout.write(c); sys.stdout.flush()
-                if got: print()
+                        try:
+                            chunk = json.loads(line.decode())
+                            content = chunk.get("message", {}).get("content", "")
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+                        if not content:
+                            continue
+                        if not started:
+                            started = True
+                            spinner.stop()
+                        full += content
+                        sys.stdout.write(content)
+                        sys.stdout.flush()
+                if started:
+                    print()
                 return True, full
+
             except KeyboardInterrupt:
-                sp.stop()
-                print(f"\n  {C.YELLOW}⛔ LLM cancelled{C.RESET}")
+                spinner.stop()
+                print(f"\n  {C.YELLOW}⛔ Cancelled{C.RESET}")
                 return False, full
-            except Exception as e:
-                if a < 2: sp.stop(); time.sleep(1)
-                else: sp.stop(); print(f"\n{C.RED}✗ Ollama unreachable{C.RESET}"); return False, ""
-        if not got: sp.stop()
-        return got, full
+            except Exception as exc:
+                if attempt < 2:
+                    spinner.stop()
+                    time.sleep(1)
+                else:
+                    spinner.stop()
+                    print(f"\n  {C.RED}✗ Ollama unreachable ({exc}){C.RESET}")
+                    return False, ""
 
-SIMPLE_CMDS = {
-    "list": "ls",
-    "list files": "ls -la",
-    "list all": "ls -la",
-    "show files": "ls -la",
-    "what's here": "ls",
-    "whats here": "ls",
-    "dir": "ls",
-    "pwd": "pwd",
-    "where am i": "pwd",
-    "date": "date",
-    "time": "date",
-    "whoami": "whoami",
-    "help": "echo 'Commands: list, pwd, date, cd <path>, mkdir <name>, make a folder <name>'",
-}
+        if not started:
+            spinner.stop()
+        return started, full
 
-SHELL_CMDS = {"ls","cd","mkdir","pwd","date","whoami","echo","cat","touch","rm","cp","mv",
-              "grep","find","sort","head","tail","wc","chmod","chown","ps","top","kill",
-              "df","du","free","uname","which","whereis","apt","pip","npm","git","docker"}
+# ─── System Prompt ────────────────────────────────────────────────────────────
 
-class InputClassifier:
-    GREETINGS = {"hey","hi","hello","yo","sup","heyo","howdy"}
-    ANGER = {"wtf","wth","stupid","bad","terrible","broken","useless"}
-    AFFIRM = {"yes","y","yeah","yep","sure","ok","okay","do it","run","execute","go"}
-    REJECT = {"no","n","nope","nah","cancel","stop","dont","don't","skip"}
-    QUESTIONS = ["what","why","how","when","where","who","which"]
+SYSTEM_PROMPT = """You are Code Agent — an autonomous terminal coding assistant powered by Ollama.
 
-    @classmethod
-    def classify(cls, text):
-        t = text.strip().lower()
-        if t in cls.GREETINGS: return "greeting"
-        if t in cls.ANGER: return "anger"
-        if t in cls.AFFIRM: return "affirm"
-        if t in cls.REJECT: return "reject"
-        if any(t.startswith(q) for q in cls.QUESTIONS): return "question"
-        if t.startswith("cd "): return "cd_cmd"
-        if t in SIMPLE_CMDS: return "simple_cmd"
-        if re.match(r'mk(?:dir)?\s+', t): return "direct_op"
-        if re.match(r'(?:make|create)\s+(?:a\s+)?(?:folder|dir|directory)\s+', t): return "direct_op"
-        return "command"
+You take full ownership of every task. You think, act, and summarize.
 
-SYS = memory.get("prompt", "") or """You are CODEX — an action-oriented terminal AI agent. You run commands for the user.
+## Workflow
+1. **Think** — Plan your approach before executing
+2. **Execute** — Use tools one at a time, waiting for results
+3. **Summarize** — When done, output a concise summary
 
-CORE BEHAVIOR:
-- Frame everything as actions YOU are taking: "Let me..." or "I will..."
-- NEVER say "you can run", "you could try", "you might want to" — YOU execute commands
-- NEVER apologize or say "I'm an AI", "I'm text-based", "I cannot do that" — just try another way
-- NEVER output text without a ```bash block — every response must include runnable commands
-- Keep anything before code to 1 short sentence max (e.g. "Let me check." or "Let me look at that.")
-- When a command FAILS → read the error and try a different approach immediately
-- When a command SUCCEEDS → just say "Done." and move on, no lengthy confirmations
-- Think step by step. Output one command at a time for multi-step tasks.
+## Available Tools
 
-RULES:
-1. Output complete, runnable bash commands — NO placeholders like <filename>
-2. NEVER ask for credentials unless the task is explicitly about git auth
-3. You get 3 attempts per command, then explain the problem briefly and ask for help
-4. mkdir, cd, and simple list commands are handled by the script directly — focus on everything else"""
+Output tool calls as JSON inside `<tool_call>` tags:
 
-def prompt(cwd, mode):
-    return f"{SYS}\n\nDIR: {cwd}\nMODE: {mode.upper()}\n"
+<tool_call>
+{"name": "tool_name", "args": { ... }}
+</tool_call>
 
-class CodexAgent:
+### `think`
+Internal reasoning. Plan your steps here.
+- Args: `thought` (str)
+
+### `execute_command`
+Run any bash command. Returns stdout/stderr + exit code.
+- Args: `command` (str)
+- Note: `cd` is handled internally — directory changes persist.
+
+### `read_file`
+Read a file's contents.
+- Args: `path` (str)
+
+### `write_file`
+Create or overwrite a file.
+- Args: `path` (str), `content` (str)
+
+### `edit_file`
+Make a targeted string replacement in a file.
+- Args: `path` (str), `old_string` (str), `new_string` (str)
+
+### `search_code`
+Search for a pattern in files (uses rg or grep).
+- Args: `pattern` (str), `path` (str, default: ".")
+
+## Rules
+1. Start every complex task with a `think` call to plan.
+2. Execute ONE tool at a time. Wait for results before proceeding.
+3. On failure, try a different approach (up to 3 attempts per step).
+4. NEVER ask for credentials or personal info.
+5. When the task is complete, output:
+
+<summary>
+✅ **Task Complete**
+- What was accomplished
+- Key results
+</summary>
+
+6. Be concise. Let your actions speak for themselves."""
+
+# ─── Agent Core ───────────────────────────────────────────────────────────────
+
+
+class CodeAgent:
+    """Main agent class — manages LLM conversation, tool execution, and UI."""
+
+    TOOL_CALL_RE = re.compile(
+        r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL
+    )
+    SUMMARY_RE = re.compile(
+        r'<summary>(.*?)</summary>', re.DOTALL
+    )
+
     def __init__(self):
         self.cwd = os.getcwd()
-        self.client = OllamaClient(OLLAMA_URL, MODEL_NAME)
-        self.log = []; self.mode = "auto"; self._pending = None
-        self._running_proc = None; self._awaiting = False
-        # ── Load previous history from persistent memory ──
-        saved_history = memory.get("history", [])
-        self.history = [{"role":"system","content":prompt(self.cwd,self.mode)}]
-        for msg in saved_history[-MAX_HISTORY:]:
+        self.model = memory.get("model", DEFAULT_MODEL)
+        self.client = OllamaClient(OLLAMA_URL, self.model)
+        self.history: list[dict] = []
+        self.results_log: list[ToolResult] = []
+        self.running_proc: Optional[subprocess.Popen] = None
+        self.width = shutil.get_terminal_size((80, 24)).columns
+        self._init_history()
+
+    # ── History Management ──────────────────────────────────────────────────
+
+    def _init_history(self) -> None:
+        """Build the conversation history from saved state."""
+        sys_prompt = memory.get("system_prompt", "") or SYSTEM_PROMPT
+        cwd_info = f"\nCurrent directory: {self.cwd}\nOS: {sys.platform}"
+        self.history = [
+            {"role": "system", "content": sys_prompt + cwd_info}
+        ]
+        saved = memory.get("history", [])
+        for msg in saved[-MAX_HISTORY:]:
             if msg.get("role") in ("user", "assistant"):
                 self.history.append(msg)
-        self.cls = InputClassifier()
 
-    def _rebuild(self):
-        self.history[0] = {"role":"system","content":prompt(self.cwd,self.mode)}
+    def _update_cwd_in_prompt(self) -> None:
+        """Refresh the current directory in the system prompt."""
+        self.history[0]["content"] = re.sub(
+            r"Current directory: .*",
+            f"Current directory: {self.cwd}",
+            self.history[0]["content"],
+        )
 
-    def _save_memory_now(self):
-        """Persist current state to memory.json."""
-        memory["history"] = [m for m in self.history[1:] if m["role"] in ("user","assistant")][-MAX_HISTORY:]
-        memory["model"] = MODEL_NAME
-        memory["prompt"] = SYS
+    def _trim_history(self) -> None:
+        """Keep history within limit, preserving system prompt."""
+        if len(self.history) > MAX_HISTORY:
+            self.history = [self.history[0]] + self.history[-(MAX_HISTORY - 1):]
+
+    def _persist(self) -> None:
+        """Save current state to memory."""
+        memory["history"] = [
+            m for m in self.history[1:]
+            if m["role"] in ("user", "assistant")
+        ][-MAX_HISTORY:]
+        memory["model"] = self.model
         save_memory(memory)
 
-    def estimate_tokens(self):
-        return int(sum(len(m["content"].split()) for m in self.history) / 0.75)
+    def estimate_tokens(self) -> int:
+        """Rough token estimate from word count."""
+        return int(
+            sum(len(m.get("content", "").split()) for m in self.history)
+            / 0.75
+        )
 
-    def prompt_str(self):
-        p = self.cwd.replace(HOME,"~"); t = self.estimate_tokens()
-        tag = f"{C.GREEN}AU{C.RESET}" if self.mode=="auto" else f"{C.YELLOW}MA{C.RESET}"
-        return f"{C.CYAN}{p}{C.RESET} {C.TOKEN}[{t}t]{C.RESET} {tag} {C.GREEN}❯{C.RESET} "
+    # ── Terminal UI ─────────────────────────────────────────────────────────
 
-    def extract_cmds(self, text):
-        """Aggressively extract runnable commands from AI response."""
-        cmds = []
-        seen = set()
-        # 1. Extract from ```code blocks
-        for lang, code in re.findall(r'```(\w+)?\s*([\s\S]*?)```', text):
-            code = code.strip()
-            if lang.lower() not in ("bash","sh","shell","cmd","powershell",""): continue
-            for line in code.split("\n"):
-                line = line.strip().lstrip("$ ")  # strip shell prompt prefix
-                if line and not line.startswith("#") and not line.startswith("//"):
-                    if line not in seen:
-                        seen.add(line)
-                        cmds.append(line)
-        # 2. Extract from inline backticks: `command`
-        if not cmds:
-            for match in re.findall(r'`([^`]+)`', text):
-                cmd = match.strip().lstrip("$ ")
-                if cmd and not cmd.startswith("#"):
-                    first = cmd.split()[0].lower() if cmd.split() else ""
-                    if first in SHELL_CMDS or first.startswith("./") or first.startswith("/"):
-                        if cmd not in seen:
-                            seen.add(cmd)
-                            cmds.append(cmd)
-        # 3. Fallback: single line that looks like a command
-        if not cmds:
-            t = text.strip().lstrip("$ ")
-            if t and "\n" not in t:
-                first = t.split()[0].lower() if t.split() else ""
-                if first in SHELL_CMDS or first.startswith("./") or first.startswith("/"):
-                    cmds.append(t)
-        return cmds
+    def print_header(self) -> None:
+        """Render the startup banner."""
+        w = min(self.width, 64)
+        print(f"\n{C.BOLD}{C.CYAN}╔{'═' * (w - 2)}╗{C.RESET}")
+        title = "⚡ Code Agent v4"
+        pad = (w - 2 - len(title)) // 2
+        print(f"{C.BOLD}{C.CYAN}║{' ' * pad}{title}{' ' * (w - 2 - len(title) - pad)}║{C.RESET}")
+        print(f"{C.BOLD}{C.CYAN}╚{'═' * (w - 2)}╝{C.RESET}")
+        print(f"  {C.GRAY}Model:  {C.YELLOW}{self.model}{C.RESET}")
+        print(f"  {C.GRAY}CWD:    {C.CYAN}{self.cwd.replace(HOME, '~')}{C.RESET}")
+        print(f"  {C.GRAY}Memory: {C.DIM}{MEMORY_FILE.name}{C.RESET}")
+        if memory.get("last_summary"):
+            last = memory["last_summary"].split("\n")[0][:60]
+            print(f"  {C.GRAY}Last:   {C.DIM}{last}{C.RESET}")
+        print(f"  {C.LINE}{'─' * w}{C.RESET}")
 
-    def list_dirs(self, path):
-        try: return [e for e in os.listdir(path) if os.path.isdir(os.path.join(path, e))]
-        except: return []
+    def prompt_str(self) -> str:
+        """Build the input prompt with directory and token count."""
+        p = self.cwd.replace(HOME, "~")
+        t = self.estimate_tokens()
+        return f"{C.CYAN}{p}{C.RESET} {C.TOKEN}[{t}t]{C.RESET} {C.GREEN}❯{C.RESET} "
 
-    def find_best_match(self, name, root=None):
-        if root is None: root = self.cwd
-        nl = name.lower()
-        for check in [
-            lambda e,nl: e.lower()==nl,
-            lambda e,nl: nl in e.lower(),
-            lambda e,nl: e.lower().startswith(nl),
-        ]:
-            try:
-                for entry in os.listdir(root):
-                    fp = os.path.join(root, entry)
-                    if os.path.isdir(fp) and check(entry, nl): return fp, entry
-            except: pass
-        parent = os.path.dirname(root)
-        if parent and parent != root: return self.find_best_match(name, parent)
-        return None, None
+    def show_thinking(self, thought: str) -> None:
+        """Display a thinking block with reasoning."""
+        w = min(self.width, 64)
+        print(f"\n{C.THINK}┌ {'💭 Thinking':<{w - 4}}┐{C.RESET}")
+        for line in thought.strip().split("\n"):
+            for wl in textwrap.wrap(line, width=w - 6):
+                print(f"{C.THINK}│ {wl:<{w - 4}}│{C.RESET}")
+        print(f"{C.THINK}└{'─' * (w - 2)}┘{C.RESET}")
 
-    def do_cd(self, path):
-        expanded = os.path.expanduser(path)
-        test = expanded if os.path.isabs(expanded) else os.path.join(self.cwd, expanded)
-        test = os.path.normpath(test)
-        if os.path.isdir(test):
-            os.chdir(test); self.cwd = os.getcwd(); self._rebuild()
-            print(f"  📍 {self.cwd.replace(HOME,'~')}"); return True
-        fp, m = self.find_best_match(os.path.basename(test),
-            os.path.dirname(test) if os.path.isdir(os.path.dirname(test)) else None)
-        if fp:
-            os.chdir(fp); self.cwd = os.getcwd(); self._rebuild()
-            print(f"  {C.DIM}→ '{m}'{C.RESET}\n  📍 {self.cwd.replace(HOME,'~')}"); return True
-        dirs = self.list_dirs(self.cwd)
-        if dirs: print(f"  {C.YELLOW}📂 Available: {', '.join(dirs[:10])}{C.RESET}")
-        else: print(f"  {C.RED}📂 No dirs{C.RESET}")
-        return False
+    def show_tool_call(self, name: str, args: dict) -> None:
+        """Display a tool invocation."""
+        parts = []
+        short_args = dict(args)
+        for k, v in short_args.items():
+            if isinstance(v, str) and len(v) > 60:
+                parts.append(f"{k}={v[:57]}...")
+            else:
+                parts.append(f"{k}={v}")
+        desc = ", ".join(parts[:2])
+        if len(parts) > 2:
+            desc += " ..."
+        print(f"\n  {C.BLUE}🔧 {C.BOLD}{name}{C.RESET} {C.GRAY}({desc}){C.RESET}")
 
-    def do_mkdir(self, name):
-        name = name.strip().strip("'\"")
-        path = os.path.join(self.cwd, name)
-        try:
-            os.makedirs(path, exist_ok=True)
-            print(f"  {C.GREEN}✅ Created '{name}'{C.RESET}")
-            return True
-        except Exception as e:
-            print(f"  {C.RED}❌ {e}{C.RESET}")
-            return False
-
-    def run_cmd(self, cmd):
-        t0 = time.time(); out=""; success=False; cancelled=False; ec = -1
-        try:
-            self._running_proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, cwd=self.cwd, preexec_fn=os.setsid)
-            try:
-                out,_ = self._running_proc.communicate(timeout=COMMAND_TIMEOUT)
-                ec = self._running_proc.returncode
-                if ec == 0: success = True
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(self._running_proc.pid), signal.SIGKILL)
-                out = "⏱ timeout"; ec = -1
-        except KeyboardInterrupt:
-            if self._running_proc and self._running_proc.poll() is None:
-                try: os.killpg(os.getpgid(self._running_proc.pid), signal.SIGKILL)
-                except: self._running_proc.kill()
-            out = "⛔ Cancelled"; cancelled = True; ec = -1; print()
-        finally:
-            self._running_proc = None
-        duration = time.time() - t0
-        r = CmdResult(success, out.strip(), ec, duration, cmd)
-        self.log.append(r)
-        if success:
-            mark = f"{C.GREEN}✓{C.RESET}"
-        elif cancelled:
-            mark = f"{C.YELLOW}⛔{C.RESET}"
+    def show_tool_result(self, result: ToolResult) -> None:
+        """Display tool execution result with truncated output."""
+        if result.cancelled:
+            status = f"{C.YELLOW}⛔ Cancelled{C.RESET}"
+        elif result.success:
+            status = f"{C.GREEN}✓ Done{C.RESET}"
         else:
-            mark = f"{C.RED}✗{C.RESET}"
-        info = f" (exit {ec})" if not success and not cancelled and ec != -1 else ""
-        print(f"  {mark} {C.GRAY}{cmd}{C.RESET}{info} ({duration:.2f}s)")
-        if out.strip() and not cancelled:
-            for line in out.strip().split("\n")[:15]:
-                print(f"    {line}")
-        elif not success and not out.strip() and not cancelled:
-            if "mkdir" in cmd:
-                print(f"    {C.DIM}(dir may already exist){C.RESET}")
-        return r, cancelled
+            status = f"{C.RED}✗ Failed{C.RESET}"
+        print(f"  {status} {C.GRAY}({result.duration:.2f}s){C.RESET}")
 
-    def send_with_think(self, prompt_text):
-        print(f"\n{C.THINK}┌─ thinking ─────────────────────{C.RESET}")
-        self.history.append({"role":"user","content":prompt_text})
-        ok, resp = self.client.chat(self.history)
-        print(f"{C.THINK}└─────────────────────────────────{C.RESET}")
-        if ok:
-            self.history.append({"role":"assistant","content":resp})
-            if len(self.history) > MAX_HISTORY:
-                self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
-            # ── Persist after each AI response ──
-            memory["last_user"] = prompt_text
-            memory["last_response"] = resp
-            self._save_memory_now()
-            return resp
-        return None
+        output = result.output.strip()
+        if not output:
+            if not result.success and not result.cancelled:
+                print(f"    {C.DIM}(no output){C.RESET}")
+            return
 
-    def is_hallucinating(self, resp, task):
-        rl = resp.lower(); tl = task.lower()
-        creds = ["github username","github credentials","git user","password","api key","ssh key"]
-        needs_git = any(g in tl for g in ["git","push","pull","commit","clone","remote"])
-        for kw in creds:
-            if kw in rl and not needs_git: return True, f"Credential request '{kw}' unrelated"
-        return False, None
+        lines = output.split("\n")
+        max_lines = 18
+        display = lines[:max_lines]
+        for line in display:
+            if len(line) > self.width - 8:
+                line = line[: self.width - 11] + "..."
+            print(f"    {line}")
+        if len(lines) > max_lines:
+            print(f"    {C.GRAY}... and {len(lines) - max_lines} more lines{C.RESET}")
 
-    def run_auto_cycle(self, resp, task=""):
-        attempts = 0; max_auto = 3; last = ""
-        for loop in range(10):
-            if last and resp == last:
-                attempts += 1
-                if attempts >= max_auto:
-                    print(f"  {C.YELLOW}❌ Repeating {attempts+1}x — resetting{C.RESET}")
-                    if len(self.history) >= 2: self.history.pop()
-                    resp = self.send_with_think(
-                        f"Stop repeating. Task: {task[:100]}. Try a different approach.")
-                    if not resp: return; attempts = 0; last = ""; continue
-            last = resp
-            is_h, reason = self.is_hallucinating(resp, task)
-            if is_h:
-                print(f"  {C.YELLOW}⚠️ {reason}{C.RESET}")
-                if len(self.history) >= 2: self.history.pop()
-                resp = self.send_with_think(f"Stop asking for credentials. Task: {task[:100]}.")
-                if not resp: return; continue
-            cmds = self.extract_cmds(resp)
-            if not cmds:
-                rl = resp.lower()
-                if any(q in rl for q in ["what is","i need","please provide","tell me","enter your","provide"]):
-                    self._awaiting = True
-                    print(f"\n  {C.BLUE}💬 [Codex needs your input]{C.RESET}")
-                    return
-                # If response has no commands and isn't asking for input — force it
-                if not any(apology in rl for apology in ["sorry","can't","cannot","i'm an ai","text based"]):
-                    print(f"  {C.YELLOW}⚠️ No commands in response — re-prompting{C.RESET}")
-                    if len(self.history) >= 2: self.history.pop()
-                    resp = self.send_with_think(
-                        f"Output actual bash commands in ```bash blocks. No explanations. Task: {task[:100]}")
-                    if not resp: return
-                    continue
-                return
-            all_ok = True
-            for c in cmds:
-                cd_m = re.match(r'^cd\s+(.+)$', c)
-                if cd_m:
-                    if not self.do_cd(cd_m.group(1)):
-                        all_ok = False; attempts += 1
-                        dirs = self.list_dirs(self.cwd)
-                        ds = ", ".join(dirs[:15]) if dirs else "(none)"
-                        if attempts >= max_auto:
-                            print(f"  {C.YELLOW}❌ Can't find dir after {attempts} tries{C.RESET}")
-                            self.send_with_think(
-                                f"Can't find dir. Available: {ds}. Ask user for help.")
-                            self._awaiting = True; return
-                        else:
-                            resp = self.send_with_think(
-                                f"cd failed. Available: {ds}. Try a different dir.")
-                            if not resp: return; break
-                    continue
-                mk_m = re.match(r'^mkdir\s+(.+)$', c)
-                if mk_m: self.do_mkdir(mk_m.group(1)); continue
-                r, cancelled = self.run_cmd(c)
-                if cancelled: return
-                if not r.success:
-                    all_ok = False; attempts += 1
-                    if attempts >= max_auto:
-                        print(f"  {C.YELLOW}❌ Failed {attempts} times{C.RESET}")
-                        self.send_with_think(
-                            f"Failed {attempts}x:\n{r.command}\n{r.output[:400]}\nExplain the problem, ask user for help.")
-                        self._awaiting = True; return
-                    else:
-                        resp = self.send_with_think(
-                            f"Attempt {attempts+1} failed:\n{r.command}\n{r.output[:400]}\nTry a different approach.")
-                        if not resp: return; break
-            if all_ok:
-                if attempts:
-                    print(f"  {C.GREEN}✓ Done after {attempts+1} attempt(s){C.RESET}")
-                return
-        print(f"  {C.YELLOW}⚠️ Gave up.{C.RESET}")
+    def show_summary(self, text: str) -> None:
+        """Display the final task summary in a bordered box."""
+        w = min(self.width, 64)
+        print(f"\n{C.GREEN}┌{'─' * (w - 2)}┐{C.RESET}")
+        for line in text.strip().split("\n"):
+            for wl in textwrap.wrap(line, width=w - 4):
+                print(f"{C.GREEN}│ {wl:<{w - 4}}│{C.RESET}")
+        print(f"{C.GREEN}└{'─' * (w - 2)}┘{C.RESET}")
 
-    def handle_greeting(self):
-        print(f"  {C.CYAN}{random.choice(['Hey!','Hi!','Yo!','Hello!'])} What's up?{C.RESET}")
-    def handle_anger(self):
-        print(f"  {C.YELLOW}Sorry, what's wrong?{C.RESET}")
-    def handle_question(self, inp):
-        self.history.append({"role":"user","content":f"Answer briefly with bash commands if applicable: {inp}"})
-        ok, resp = self.client.chat(self.history)
-        if ok:
-            self.history.append({"role":"assistant","content":resp})
-            if len(self.history) > MAX_HISTORY:
-                self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
-            # ── Persist ──
-            memory["last_user"] = inp
-            memory["last_response"] = resp
-            self._save_memory_now()
+    def show_error(self, msg: str) -> None:
+        """Display an error message."""
+        print(f"  {C.RED}✗ {msg}{C.RESET}")
 
-    def run(self):
-        os.system("cls" if os.name == "nt" else "clear")
-        print(f"{C.BOLD}{C.CYAN}╔════════════════════════╗")
-        print(f"║   ⚡ CODEX v3.2 AI   ║")
-        print(f"╚════════════════════════╝{C.RESET}")
-        print(f"  {C.YELLOW}{MODEL_NAME}{C.RESET}")
-        print(f"  {C.GRAY}Direct: list, cd, mkdir, make a folder{C.RESET}")
-        print(f"  {C.GRAY}:auto  :manual  exit  Ctrl+C = interrupt only{C.RESET}")
-        print(f"  {C.GRAY}💾 Persistent memory: {MEMORY_FILE}{C.RESET}")
-        # Show last conversation if available
-        if memory.get("last_user"):
-            print(f"  {C.DIM}Last: {memory['last_user'][:50]}{C.RESET}")
-        print(f"{C.CYAN}{'─'*50}{C.RESET}")
-        while True:
+    def show_info(self, msg: str) -> None:
+        """Display an info message."""
+        print(f"  {C.GRAY}{msg}{C.RESET}")
+
+    # ── Tool Implementations ────────────────────────────────────────────────
+
+    def tool_execute_command(self, command: str) -> ToolResult:
+        """Run a bash command, capture output, handle cd specially."""
+        t0 = time.time()
+        cancelled = False
+        ec = -1
+        out = ""
+
+        # Detect cd and handle it natively so it persists
+        cd_match = re.match(r'^cd\s+(.+)$', command.strip())
+        if cd_match:
+            return self._handle_cd_tool(cd_match.group(1).strip())
+
+        try:
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=self.cwd,
+                preexec_fn=os.setsid,
+            )
+            self.running_proc = proc
             try:
+                out, _ = proc.communicate(timeout=COMMAND_TIMEOUT)
+                ec = proc.returncode
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                out = "⏱ Timeout reached"
+                ec = -1
+        except KeyboardInterrupt:
+            if self.running_proc and self.running_proc.poll() is None:
                 try:
-                    inp = input(self.prompt_str()).strip()
-                except (KeyboardInterrupt, EOFError):
-                    print()
-                    continue
-                if not inp: continue
-                if inp.lower() == "exit":
-                    # ── Save memory on exit ──
-                    self._save_memory_now()
-                    print(f"  {C.GREEN}👋 Bye! Memory saved.{C.RESET}")
-                    break
-                if inp.lower() in (":auto",":a"):
-                    self.mode="auto"; self._rebuild(); print(f"  {C.GREEN}⚡ Auto{C.RESET}"); continue
-                if inp.lower() in (":manual",":m"):
-                    self.mode="manual"; self._rebuild(); print(f"  {C.YELLOW}🔒 Manual{C.RESET}"); continue
+                    os.killpg(os.getpgid(self.running_proc.pid), signal.SIGKILL)
+                except Exception:
+                    self.running_proc.kill()
+            out = "⛔ Cancelled"
+            cancelled = True
+            ec = -1
+            print()
+        finally:
+            self.running_proc = None
 
-                cls = self.cls.classify(inp)
-                if self._awaiting:
-                    self._awaiting = False
-                    self.history.append({"role":"user","content":inp})
-                    ok, resp = self.client.chat(self.history)
-                    if ok:
-                        self.history.append({"role":"assistant","content":resp})
-                        memory["last_user"] = inp
-                        memory["last_response"] = resp
-                        self._save_memory_now()
-                        if self.mode == "auto": self.run_auto_cycle(resp, inp)
-                    continue
-                if self._pending:
-                    if cls == "affirm":
-                        for c in self._pending:
-                            cd_m = re.match(r'^cd\s+(.+)$', c)
-                            if cd_m: self.do_cd(cd_m.group(1))
-                            else: self.run_cmd(c)
-                        self._pending = None; continue
-                    elif cls == "reject": self._pending = None; continue
-                if cls == "greeting": self.handle_greeting(); continue
-                if cls == "anger": self.handle_anger(); continue
-                if cls == "cd_cmd": self.do_cd(inp[3:].strip()); continue
-                if cls == "question": self.handle_question(inp); continue
-                if cls == "simple_cmd":
-                    self.run_cmd(SIMPLE_CMDS[inp.lower()]); continue
-                if cls == "direct_op":
-                    m = re.match(r'mk(?:dir)?\s+(.+)$', inp)
-                    if not m: m = re.match(r'(?:make|create)\s+(?:a\s+)?(?:folder|dir|directory)\s+(.+)$', inp)
-                    if m: self.do_mkdir(m.group(1)); continue
+        return ToolResult(
+            success=(ec == 0 and not cancelled),
+            output=out.strip(),
+            duration=time.time() - t0,
+            tool="execute_command",
+            args={"command": command},
+            cancelled=cancelled,
+        )
 
-                # ── LLM route ──
-                self.history.append({"role":"user","content":inp})
-                ok, resp = self.client.chat(self.history)
-                if not ok: self.history.pop(); continue
-                if self.mode == "auto":
-                    self.run_auto_cycle(resp, inp)
-                else:
-                    cmds = self.extract_cmds(resp)
-                    if cmds:
-                        print(f"\n  {C.YELLOW}❓ Run {len(cmds)} command(s)? (yes/no){C.RESET}")
-                        self._pending = cmds
-                self.history.append({"role":"assistant","content":resp})
-                if len(self.history) > MAX_HISTORY:
-                    self.history = [self.history[0]] + self.history[-(MAX_HISTORY-1):]
-                # ── Persist after LLM response ──
-                memory["last_user"] = inp
-                memory["last_response"] = resp
-                self._save_memory_now()
+    def _handle_cd_tool(self, path: str) -> ToolResult:
+        """Handle cd natively so directory change persists."""
+        t0 = time.time()
+        expanded = os.path.expanduser(path)
+        test = expanded if os.path.isabs(expanded) else os.path.join(
+            self.cwd, expanded
+        )
+        test = os.path.normpath(test)
 
-            except KeyboardInterrupt:
-                if self._running_proc and self._running_proc.poll() is None:
-                    try: os.killpg(os.getpgid(self._running_proc.pid), signal.SIGKILL)
-                    except: self._running_proc.kill()
-                print(f"\n  {C.YELLOW}⛔ Interrupted{C.RESET}")
+        if os.path.isdir(test):
+            os.chdir(test)
+            self.cwd = os.getcwd()
+            self._update_cwd_in_prompt()
+            return ToolResult(
+                True,
+                f"→ {self.cwd.replace(HOME, '~')}",
+                time.time() - t0,
+                "execute_command",
+                {"command": f"cd {path}"},
+            )
+
+        # Fuzzy match
+        for entry in os.listdir(os.path.dirname(test) or "."):
+            fp = os.path.join(os.path.dirname(test) or ".", entry)
+            if os.path.isdir(fp) and (
+                entry == os.path.basename(test)
+                or os.path.basename(test).lower() in entry.lower()
+            ):
+                os.chdir(fp)
+                self.cwd = os.getcwd()
+                self._update_cwd_in_prompt()
+                return ToolResult(
+                    True,
+                    f"→ '{entry}'\n📍 {self.cwd.replace(HOME, '~')}",
+                    time.time() - t0,
+                    "execute_command",
+                    {"command": f"cd {path}"},
+                )
+
+        dirs = [
+            d for d in os.listdir(self.cwd)
+            if os.path.isdir(os.path.join(self.cwd, d))
+        ]
+        hint = f"\nAvailable: {', '.join(dirs[:10])}" if dirs else ""
+        return ToolResult(
+            False,
+            f"Directory not found: {path}{hint}",
+            time.time() - t0,
+            "execute_command",
+            {"command": f"cd {path}"},
+        )
+
+    def tool_read_file(self, path: str) -> ToolResult:
+        """Read a file from disk."""
+        t0 = time.time()
+        try:
+            full = path if os.path.isabs(path) else os.path.join(self.cwd, path)
+            with open(full) as f:
+                content = f.read()
+            return ToolResult(True, content, time.time() - t0, "read_file",
+                              {"path": path})
+        except Exception as exc:
+            return ToolResult(False, str(exc), time.time() - t0, "read_file",
+                              {"path": path})
+
+    def tool_write_file(self, path: str, content: str) -> ToolResult:
+        """Create or overwrite a file."""
+        t0 = time.time()
+        try:
+            full = path if os.path.isabs(path) else os.path.join(self.cwd, path)
+            os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+            with open(full, "w") as f:
+                f.write(content)
+            return ToolResult(True, f"Written {len(content)} bytes",
+                              time.time() - t0, "write_file",
+                              {"path": path})
+        except Exception as exc:
+            return ToolResult(False, str(exc), time.time() - t0, "write_file",
+                              {"path": path})
+
+    def tool_edit_file(self, path: str, old_string: str,
+                       new_string: str) -> ToolResult:
+        """Make a targeted string replacement in a file."""
+        t0 = time.time()
+        try:
+            full = path if os.path.isabs(path) else os.path.join(self.cwd, path)
+            with open(full) as f:
+                content = f.read()
+            if old_string not in content:
+                return ToolResult(False, f"String not found in {path}",
+                                  time.time() - t0, "edit_file",
+                                  {"path": path})
+            new_content = content.replace(old_string, new_string, 1)
+            with open(full, "w") as f:
+                f.write(new_content)
+            return ToolResult(True, "Replaced 1 occurrence",
+                              time.time() - t0, "edit_file",
+                              {"path": path})
+        except Exception as exc:
+            return ToolResult(False, str(exc), time.time() - t0, "edit_file",
+                              {"path": path})
+
+    def tool_search_code(self, pattern: str, path: str = ".") -> ToolResult:
+        """Search for a pattern using ripgrep or fallback grep."""
+        t0 = time.time()
+        search_path = path if os.path.isabs(path) else os.path.join(
+            self.cwd, path
+        )
+        try:
+            result = subprocess.run(
+                ["rg", "-n", pattern, search_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            output = result.stdout or result.stderr or "(no matches)"
+            ok = result.returncode in (0, 1)
+            return ToolResult(ok, output.strip(), time.time() - t0,
+                              "search_code", {"pattern": pattern, "path": path})
+        except FileNotFoundError:
+            try:
+                result = subprocess.run(
+                    ["grep", "-rn", pattern, search_path],
+                    capture_output=True, text=True, timeout=30,
+                )
+                output = result.stdout or result.stderr or "(no matches)"
+                ok = result.returncode in (0, 1)
+                return ToolResult(ok, output.strip(), time.time() - t0,
+                                  "search_code",
+                                  {"pattern": pattern, "path": path})
+            except Exception as exc:
+                return ToolResult(False, str(exc), time.time() - t0,
+                                  "search_code",
+                                  {"pattern": pattern, "path": path})
+        except Exception as exc:
+            return ToolResult(False, str(exc), time.time() - t0,
+                              "search_code",
+                              {"pattern": pattern, "path": path})
+
+    # ── Tool Dispatch ───────────────────────────────────────────────────────
+
+    def dispatch_tool(self, name: str, args: dict) -> ToolResult:
+        """Route a tool call to the correct handler."""
+        dispatch = {
+            "execute_command": ("command",),
+            "read_file": ("path",),
+            "write_file": ("path", "content"),
+            "edit_file": ("path", "old_string", "new_string"),
+            "search_code": ("pattern", "path"),
+        }
+
+        required = dispatch.get(name)
+        if required is None:
+            return ToolResult(False, f"Unknown tool: {name}", 0, name, args)
+
+        # Build handler args
+        handler_args = []
+        for key in required:
+            val = args.get(key)
+            if val is None:
+                return ToolResult(
+                    False, f"Missing required arg '{key}' for {name}",
+                    0, name, args,
+                )
+            handler_args.append(val)
+
+        handler = getattr(self, f"tool_{name}", None)
+        if not handler:
+            return ToolResult(
+                False, f"No handler for tool: {name}", 0, name, args,
+            )
+
+        return handler(*handler_args)
+
+    # ── Tool Call Extraction ────────────────────────────────────────────────
+
+    def extract_tool_calls(self, text: str) -> list[dict]:
+        """Extract all tool call JSON objects from AI response."""
+        calls = []
+        for match in self.TOOL_CALL_RE.finditer(text):
+            try:
+                obj = json.loads(match.group(1))
+                if isinstance(obj, dict) and "name" in obj:
+                    calls.append(obj)
+            except json.JSONDecodeError:
+                continue
+        return calls
+
+    def extract_summary(self, text: str) -> Optional[str]:
+        """Extract final summary block from AI response."""
+        match = self.SUMMARY_RE.search(text)
+        return match.group(1).strip() if match else None
+
+    def strip_tool_tags(self, text: str) -> str:
+        """Remove tool call and summary tags, leaving readable text."""
+        text = self.TOOL_CALL_RE.sub("", text)
+        text = self.SUMMARY_RE.sub("", text)
+        return text.strip()
+
+    # ── Main Execution Loop ─────────────────────────────────────────────────
+
+    def execute_task(self, user_input: str) -> Optional[str]:
+        """
+        Execute a user task through the agentic loop:
+        Send input → LLM responds → execute tools → feed back → summary
+        """
+        self.history.append({"role": "user", "content": user_input})
+
+        ok, response = self.client.chat(self.history)
+        if not ok:
+            return None
+
+        self.history.append({"role": "assistant", "content": response})
+        self._trim_history()
+
+        return self._process_response(response)  # None or summary string
+
+    def _process_response(self, response: str) -> Optional[str]:
+        """
+        Process a single LLM response. Returns a summary string or None.
+        Recursively processes tool call results from the LLM.
+        """
+        # Check for summary
+        summary = self.extract_summary(response)
+        if summary:
+            return summary
+
+        # Extract tool calls
+        tool_calls = self.extract_tool_calls(response)
+        if not tool_calls:
+            # Text-only response
+            clean = self.strip_tool_tags(response)
+            if clean:
+                print(f"\n  {clean}")
+            return None
+
+        # Show any non-tool-call text
+        clean = self.strip_tool_tags(response)
+        if clean:
+            print(f"\n  {clean}")
+
+        # Execute each tool call sequentially
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            args = tc.get("args", {})
+
+            if name == "think":
+                self.show_thinking(args.get("thought", ""))
                 continue
 
+            self.show_tool_call(name, args)
+            result = self.dispatch_tool(name, args)
+            self.show_tool_result(result)
+            self.results_log.append(result)
+
+            if result.cancelled:
+                return None
+
+            # Feed result back to LLM
+            if result.success:
+                msg = f"Result of {name}:\n{result.output[:1200]}"
+            else:
+                msg = f"Error in {name}:\n{result.output[:600]}"
+
+            self.history.append({"role": "user", "content": msg})
+
+            # Get next LLM response
+            ok, next_resp = self.client.chat(self.history)
+            if not ok:
+                return None
+
+            self.history.append({"role": "assistant", "content": next_resp})
+            self._trim_history()
+
+            # Recursively process this response
+            sub_result = self._process_response(next_resp)
+            if sub_result is not None:
+                return sub_result  # summary found higher up
+
+        # All tool calls processed, no summary found
+        return None
+
+    # ── Direct Commands ────────────────────────────────────────────────────
+
+    def handle_direct(self, inp: str) -> bool:
+        """Handle commands that don't need the LLM. Returns True if handled."""
+        lower = inp.lower().strip()
+
+        if lower in ("help", ":h", ":help"):
+            self._show_help()
+            return True
+        if lower in ("clear", ":c", ":clear"):
+            os.system("clear" if os.name != "nt" else "cls")
+            return True
+
+        # Model switching
+        model_match = re.match(r'^:model\s+(.+)$', inp)
+        if model_match:
+            new_model = model_match.group(1).strip()
+            self.model = new_model
+            self.client.model = new_model
+            memory["model"] = new_model
+            self._persist()
+            print(f"  {C.GREEN}✓ Switched to {C.YELLOW}{new_model}{C.RESET}")
+            return True
+
+        # Cd is handled as a direct command for speed
+        cd_match = re.match(r'^cd\s+(.+)$', inp)
+        if cd_match:
+            result = self._handle_cd_tool(cd_match.group(1).strip())
+            self.show_tool_result(result)
+            return True
+
+        return False
+
+    def _show_help(self) -> None:
+        """Display the help menu."""
+        w = min(self.width, 56)
+        print(f"\n{C.CYAN}╔{'═' * (w - 2)}╗{C.RESET}")
+        print(f"{C.CYAN}║{'  ⚡ Code Agent Commands':<{w - 2}}║{C.RESET}")
+        print(f"{C.CYAN}╚{'═' * (w - 2)}╝{C.RESET}")
+        print(f"  {C.GREEN}<describe your task>{C.RESET}")
+        print(f"    Tell me what you want done — I'll plan and execute")
+        print(f"\n  {C.GREEN}cd <path>{C.RESET}")
+        print(f"    Change directory (with fuzzy matching)")
+        print(f"\n  {C.GREEN}:model <name>{C.RESET}")
+        print(f"    Switch Ollama model (e.g. :model deepseek-coder:1.3b)")
+        print(f"\n  {C.GREEN}:help{C.RESET}    Show this help")
+        print(f"  {C.GREEN}:clear{C.RESET}   Clear screen")
+        print(f"  {C.GREEN}exit{C.RESET}     Save and quit")
+        print(f"\n  {C.GRAY}Tips:{C.RESET}")
+        print(f"  {C.GRAY}• Be specific about what you want{C.RESET}")
+        print(f"  {C.GRAY}• For multi-step tasks, I'll create a plan{C.RESET}")
+        print(f"  {C.GRAY}• I'll summarize results when done{C.RESET}")
+        print()
+
+    # ── Main Run Loop ──────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        """Main REPL loop."""
+        os.system("clear" if os.name != "nt" else "cls")
+        self.print_header()
+
+        while True:
+            try:
+                inp = input(self.prompt_str()).strip()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                continue
+
+            if not inp:
+                continue
+
+            if inp.lower() == "exit":
+                self._persist()
+                print(f"\n  {C.GREEN}👋 Bye! Session saved.{C.RESET}")
+                break
+
+            # Handle direct commands
+            if self.handle_direct(inp):
+                continue
+
+            # Reset results log for new task
+            self.results_log = []
+            self.show_info("Processing task...")
+
+            # Execute the task through the agentic loop
+            summary = self.execute_task(inp)
+
+            # Show summary if provided
+            if summary:
+                self.show_summary(summary)
+                memory["last_task"] = inp[:100]
+                memory["last_summary"] = summary
+            elif self.results_log:
+                # Auto-generate summary from results
+                successes = sum(1 for r in self.results_log if r.success)
+                failures = sum(1 for r in self.results_log if not r.success)
+                total_commands = sum(
+                    1 for r in self.results_log if r.tool == "execute_command"
+                )
+                status = f"{C.GREEN}✓ {successes} steps succeeded{C.RESET}"
+                if failures:
+                    status += f", {C.RED}{failures} failed{C.RESET}"
+                print(
+                    f"\n  {C.GRAY}━━━ Task complete ─━━{C.RESET}"
+                )
+                print(f"  {status}")
+                if total_commands:
+                    print(f"  {C.GRAY}{total_commands} commands executed{C.RESET}")
+
+            # Persist state
+            self._persist()
+
+
 if __name__ == "__main__":
-    CodexAgent().run()
+    CodeAgent().run()

@@ -1,0 +1,29 @@
+# ─── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ─── Virtual environments ──────────────────────────────────
+.venv/
+venv/
+env/
+.virtualenvs/
+
+# ─── Session memory (auto-generated, user-specific) ────────
+# memory.json is created automatically on first run.
+# It contains your conversation history and model selection.
+# Keep it local — do NOT commit it.
+memory.json
+
+# ─── IDE / Editor ──────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

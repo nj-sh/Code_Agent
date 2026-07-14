@@ -1,0 +1,7 @@
+{
+  "model": "qwen2.5-coder:1.5b",
+  "system_prompt": "",
+  "last_task": "",
+  "last_summary": "",
+  "history": []
+}

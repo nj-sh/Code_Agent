@@ -1,9 +1,10 @@
-# ⚡ CODEX v3.1 — Terminal AI Assistant
+# ⚡ Code Agent v4 — Ollama CLI Coding Agent
 
-> A lightweight, on-device AI coding assistant that works like GitHub Copilot — right in your Termux terminal.
-> Powered by **qwen2.5-coder:1.5b** via Ollama.
+> A lightweight, local-first coding agent powered by Ollama models.
+> Inspired by Codex CLI & Claude Code — built for private, offline
+> AI-assisted development on modest hardware.
 
-![Version](https://img.shields.io/badge/version-3.1-brightgreen)
+![Version](https://img.shields.io/badge/version-4.0-brightgreen)
 ![Model](https://img.shields.io/badge/model-qwen2.5--coder:1.5b-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-yellow)
 
@@ -11,22 +12,24 @@
 
 ## ✨ Features
 
-- **🤖 LLM-Powered Commands** — Ask in plain English, get bash commands auto-executed
-- **⚡ Direct Ops** — `list`, `cd`, `mkdir`, `make a folder` run instantly without LLM overhead
-- **🔄 Auto Mode** — AI reads your intent, runs commands, fixes failures, all automatically
-- **🔒 Manual Mode** — AI suggests commands, you approve before execution
-- **🧠 Context-Aware** — Remembers previous commands and output within session
-- **🔍 Smart Directory Search** — Fuzzy-matches `cd` targets across parent directories
-- **🧪 Repeat Detection** — Catches hallucination loops and resets automatically
-- **🚫 Credential Guard** — Blocks AI from asking for passwords/GitHub tokens unless git-related
+- **🧠 Plan → Execute → Summarize** — The agent plans its approach, executes tools one by one, and wraps up with a concise summary
+- **🔧 Tool-Based Execution** — Structured tools for `think`, `execute_command`, `read_file`, `write_file`, `edit_file`, and `search_code`
+- **🎨 Beautiful Terminal UI** — Colored output, thinking blocks, bordered summaries, and structured command display
+- **⚡ Direct Commands** — `cd` (with fuzzy matching), `:model`, `:help`, `:clear` run instantly without LLM overhead
+- **🔄 Auto-Retry** — When a command fails, the agent tries a different approach (up to 3 attempts)
+- **💾 Persistent Memory** — Session history and model selection survive restarts via `memory.json`
+- **📦 Optimized for Small Models** — Concise prompts, low temperature (0.1), and lightweight tool format work great with 1.5B–7B models
 
 ---
 
 ## 🛠️ Requirements
 
-- **Python 3.8+**
-- **Ollama** with `qwen2.5-coder:1.5b` (or any model)
-- Unix-like environment (Termux on Android, Linux, macOS)
+| Dependency | Purpose |
+|---|---|
+| **Python 3.8+** | Runtime |
+| **Ollama** | Local LLM server |
+| **A coder model** | e.g., `qwen2.5-coder:1.5b` |
+| Unix-like environment | Linux, macOS, Termux |
 
 ---
 
@@ -36,15 +39,13 @@
 # 1. Install Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
-# 2. Pull the model
+# 2. Pull a lightweight coder model
 ollama pull qwen2.5-coder:1.5b
 
-# 3. Download CODEX
-git clone https://github.com/your-username/codex.git
-cd codex
-
-# 4. Run it
-python3 codex_agent.py
+# 3. Clone and run
+git clone https://github.com/your-username/code-agent.git
+cd code-agent
+python3 Agent.py
 ```
 
 ---
@@ -52,83 +53,120 @@ python3 codex_agent.py
 ## 🎮 Usage
 
 ```
-╔════════════════════════╗
-║   ⚡ CODEX v3.1 AI   ║
-╚════════════════════════╝
-  qwen2.5-coder:1.5b
-  Direct: list, cd, mkdir, make a folder
-  :auto  :manual  exit
-──────────────────────────────────
-~ ❯
+╔══════════════════════════════════════════════╗
+║          ⚡ Code Agent v4                    ║
+╚══════════════════════════════════════════════╝
+  Model:  qwen2.5-coder:1.5b
+  CWD:    ~/projects
+  Memory: memory.json
+───────────────────────────────────────────────────
+~/projects [1.2k] ❯
 ```
 
-### Examples
+### Example Session
 
-| You type | What happens |
-|---|---|
-| `list folders` | `ls -d */` — runs instantly, no LLM |
-| `list all files` | `ls -la` — shows everything |
-| `cd Downloads` | Fuzzy-finds and changes directory |
-| `make a folder projects` | `mkdir projects` — creates it |
-| `show me all python files` | LLM generates `find . -name "*.py"` |
-| `delete the temp folder` | LLM decides best approach |
-| `:manual` | Switch to manual mode (approve each command) |
-| `:auto` | Switch back to auto mode |
-| `exit` | Quit |
+```
+~/projects [1.2k] ❯ find all python files and count lines
+
+┌ 💭 Thinking ────────────────────────────────┐
+│ I'll find .py files first, then count lines │
+└─────────────────────────────────────────────┘
+
+🔧 execute_command (command=find . -name "*.py")
+  ✓ Done (0.05s)
+    ./main.py
+    ./utils/helpers.py
+
+🔧 execute_command (command=wc -l **/*.py)
+  ✓ Done (0.02s)
+    150 total
+
+┌────────────────────────────────────────────┐
+│ ✅ **Task Complete**                       │
+│ • Found 3 Python files                     │
+│ • 150 lines of code total                  │
+└────────────────────────────────────────────┘
+```
 
 ### Commands
 
-| Command | Action |
+| Input | What happens |
 |---|---|
-| `:auto` or `:a` | Switch to **auto** mode (default) |
-| `:manual` or `:m` | Switch to **manual** mode |
-| `exit` | Quit CODEX |
+| `list files in this directory` | LLM plans and executes `ls -la` |
+| `cd Downloads` | Fuzzy-finds and changes directory instantly |
+| `create a script that greets the user` | LLM creates, writes, and may test the file |
+| `find all TODO comments` | Searches code with ripgrep/grep |
+| `:model deepseek-coder:1.3b` | Switches to a different Ollama model |
+| `:help` | Shows help menu |
+| `:clear` | Clears the screen |
+| `exit` | Saves session and quits |
+
+---
+
+## 🧠 Recommended Models
+
+Code Agent is optimized for lightweight Ollama models. Here are good choices:
+
+| Model | Size | VRAM | Speed | Quality |
+|---|---|---|---|---|
+| `qwen2.5-coder:1.5b` | ~1.5B | ~1GB | ⚡ Fast | Good (default) |
+| `deepseek-coder:1.3b` | ~1.3B | ~800MB | ⚡ Fastest | Good |
+| `stable-code:3b` | ~3B | ~1.8GB | 🚀 Fast | Better |
+| `codegemma:2b` | ~2B | ~1.2GB | 🚀 Fast | Good |
+| `qwen2.5-coder:7b` | ~7B | ~4GB | 🐢 Slower | Best |
+
+Switch models anytime with `:model <name>`.
 
 ---
 
 ## 🔧 How It Works
 
 ```
-┌──────────┐    ┌─────────────┐    ┌──────────┐
-│  User    │───▶│ Classifier  │───▶│ Direct?  │──▶ Run command
-│  Input   │    │ (greeting,  │    │ (list,   │
-│          │    │  command,   │    │  cd,     │
-│          │    │  question)  │    │  mkdir)  │
-└──────────┘    └──────┬──────┘    └──────────┘
-                       │ LLM route
-                       ▼
-                ┌──────────────┐
-                │ Ollama       │
-                │ qwen2.5-coder│
-                └──────┬───────┘
-                       │ bash commands
-                       ▼
-                ┌──────────────┐     ┌──────────┐
-                │ Extractor    │────▶│ Auto     │──▶ Execute + retry
-                │ (``` blocks) │     │ Cycle    │    on failure
-                └──────────────┘     └──────────┘
+User Input
+    │
+    ▼
+┌──────────────┐     ┌─────────────────┐
+│  Direct?     │────▶│ cd, :model,     │
+│  (no LLM)    │     │ :help, :clear   │
+└──────┬───────┘     └─────────────────┘
+       │ LLM route
+       ▼
+┌──────────────────────────────────────────┐
+│  Agentic Loop                            │
+│                                          │
+│  1. LLM thinks & plans (think tool)      │
+│  2. LLM outputs tool calls               │
+│     <tool_call>{"name":"execute_command",│
+│       "args":{"command":"ls -la"}}</>    │
+│  3. Agent executes tool, captures result │
+│  4. Result fed back to LLM               │
+│  5. Repeat until summary is emitted      │
+│     <summary>✅ Done...</summary>        │
+│  6. Summary displayed to user            │
+└──────────────────────────────────────────┘
 ```
+
+### Available Tools
+
+| Tool | Purpose |
+|---|---|
+| `think` | Internal reasoning and planning |
+| `execute_command` | Run any bash command |
+| `read_file` | Read a file's contents |
+| `write_file` | Create or overwrite a file |
+| `edit_file` | Make targeted string replacements |
+| `search_code` | Search patterns with ripgrep/grep |
 
 ---
 
-## 🚀 Making It Act Like GitHub Copilot
+## 🗂️ Project Structure
 
-CODEX v3.1 already behaves like Copilot in these ways:
-
-- ✅ **Context-aware** — it knows your current directory
-- ✅ **Auto-executes** — no manual copy-paste of suggested commands
-- ✅ **Self-correcting** — retries with a different approach on failure
-- ✅ **Concise** — one-sentence explanations, no fluff
-- ✅ **In-line output** — shows command results immediately
-
-### Pro Tips
-
-| Goal | How |
-|---|---|
-| Multi-step tasks | `"find all .py files, count lines, sort by size"` |
-| Git workflows | `"commit and push with message 'fixed bug'"` |
-| File editing | `"add a shebang to script.sh"` |
-| Debugging | `"my script crashes, show me the error lines"` |
+```
+code-agent/
+├── Agent.py        # Main agent (v4.0)
+├── memory.json     # Persistent session memory
+└── README.md       # This file
+```
 
 ---
 
@@ -145,30 +183,8 @@ ollama serve
 ollama pull qwen2.5-coder:1.5b
 ```
 
-### Change model
-Edit `MODEL_NAME` in `codex_agent.py`:
-```python
-MODEL_NAME = "codellama:7b"  # or your preferred model
-```
-
----
-
-## 📁 Project Structure
-
-```
-codex/
-├── codex_agent.py    # Main assistant (v3.1)
-├── README.md         # This file
-└── Github/           # (your repos)
-```
-
----
-
-## 🧠 Model Notes
-
-- **Default:** `qwen2.5-coder:1.5b` — fast, ~1GB RAM, good for mobile
-- **Upgrades:** `codellama:7b` (smarter, ~4GB), `deepseek-coder:6.7b`
-- **Temperature:** 0.1 (deterministic — same input → same output)
+### Permission denied on commands
+Some commands may need elevated permissions. The agent will report the error and suggest alternatives.
 
 ---
 
@@ -176,8 +192,7 @@ codex/
 
 MIT — do whatever you want with it.
 
----
-
 ## 🙏 Credits
 
-Built with [Ollama](https://ollama.com/) + [Qwen2.5-Coder](https://github.com/QwenLM/Qwen2.5-Coder) on Termux.
+Built with [Ollama](https://ollama.com/) + [Qwen2.5-Coder](https://github.com/QwenLM/Qwen2.5-Coder).
+Inspired by OpenAI Codex CLI and Anthropic Claude Code.
