@@ -308,7 +308,14 @@ Search for a pattern in files (uses rg or grep).
 4. **Summarize LAST** - <summary> must come AFTER showing the data, never before
 5. On failure, try a different approach (up to 3 attempts)
 6. NEVER ask for credentials or personal info
-7. When showing data to user, format it nicely with text, not just raw output"""
+7. When showing data to user, format it nicely with text, not just raw output
+8. When ALL steps are done, output:
+
+<summary>
+[v] **Task Complete**
+- What was accomplished
+- Key results
+</summary>"""
 
 # --- Agent Core --------------------------------------------------------------
 
