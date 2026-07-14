@@ -245,18 +245,24 @@ SYSTEM_PROMPT = """You are Code Agent - an autonomous terminal coding assistant 
 
 ## CRITICAL: You MUST use tools to do work. NEVER just say you did something without calling the tool.
 
-Example BAD response (do NOT do this):
-I will list the files in this directory.
-<summary>Done - listed files</summary>
+## OUTPUT RULE: ALWAYS show content BEFORE summarizing.
 
-Example GOOD response:
-<tool_call>{"name": "think", "args": {"thought": "I need to list files using execute_command with ls -la"}}</tool_call>
-<tool_call>{"name": "execute_command", "args": {"command": "ls -la"}}</tool_call>
+Example BAD response (do NOT do this):
+<summary>Read the file and here is the content</summary>
+
+Example GOOD response (show content first):
+Here is the content of the file:
+```
+file content here...
+```
+<summary>Done reading the file</summary>
 
 ## Workflow (MANDATORY)
-1. **think** - Call the think tool to plan your approach and make a TODO list
-2. **Execute ONE tool at a time** - Wait for the result before proceeding to next step
-3. **Summarize** - Only when ALL steps are done, output <summary>...</summary>
+1. **think** - Plan your approach, make a TODO list
+2. **Execute ONE tool** - Call the tool, wait for result
+3. **SHOW the result** - After getting tool output, write the content/data clearly to the user
+4. **Repeat** - Continue with next tool if needed
+5. **Summarize** - Only output <summary> AFTER showing the data
 
 ## Available Tools
 
@@ -296,20 +302,13 @@ Search for a pattern in files (uses rg or grep).
 - Args: `pattern` (str), `path` (str, default: ".")
 
 ## STRICT RULES
-1. **START every task with a `think` call** to plan. Include a numbered TODO list.
-2. **Execute ONE tool at a time.** Wait for results before proceeding.
-3. **NEVER jump straight to <summary>** without using tools first.
-4. On failure, try a different approach (up to 3 attempts per step).
-5. NEVER ask for credentials or personal info.
-6. When ALL steps are done, output:
-
-<summary>
-[v] **Task Complete**
-- What was accomplished
-- Key results
-</summary>
-
-7. Be concise. Let your actions speak for themselves."""
+1. **START every task with a `think` call**
+2. **Execute ONE tool at a time** - Wait for results before proceeding
+3. **SHOW the output to the user first** - After getting tool results, write the data clearly. This is non-negotiable.
+4. **Summarize LAST** - <summary> must come AFTER showing the data, never before
+5. On failure, try a different approach (up to 3 attempts)
+6. NEVER ask for credentials or personal info
+7. When showing data to user, format it nicely with text, not just raw output"""
 
 # --- Agent Core --------------------------------------------------------------
 
@@ -405,16 +404,19 @@ class CodeAgent:
         return f"{C.CYAN}{p}{C.RESET} {mode_tag} {C.TOKEN}[{t}t]{C.RESET} {C.GREEN}>{C.RESET} "
 
     def show_thinking(self, thought: str) -> None:
-        """Display a thinking block with reasoning."""
+        """Display a thinking block with reasoning in a distinctive box."""
         w = min(self.width, 64)
-        print(f"\n{C.THINK}+- {'Thinking':<{w - 6}} -+{C.RESET}")
+        print(f"\n{C.ORANGE}+{'~' * (w - 2)}+{C.RESET}")
+        print(f"{C.ORANGE}|{C.RESET} {C.BOLD}{C.ORANGE}~ Thinking ~{C.RESET}{' ' * (w - 16)}{C.ORANGE}|{C.RESET}")
+        print(f"{C.ORANGE}+{'-' * (w - 2)}+{C.RESET}")
         for line in thought.strip().split("\n"):
             for wl in textwrap.wrap(line, width=w - 6):
-                print(f"{C.THINK}| {wl:<{w - 4}} |{C.RESET}")
-        print(f"{C.THINK}+{'-' * (w - 2)}+{C.RESET}")
+                print(f"{C.ORANGE}|{C.RESET} {C.DIM}{wl:<{w - 4}}{C.RESET} {C.ORANGE}|{C.RESET}")
+        print(f"{C.ORANGE}+{'~' * (w - 2)}+{C.RESET}")
 
     def show_tool_call(self, name: str, args: dict) -> None:
-        """Display a tool invocation."""
+        """Display a tool invocation with a labeled execution box."""
+        w = min(self.width, 64)
         parts = []
         short_args = dict(args)
         for k, v in short_args.items():
@@ -425,22 +427,24 @@ class CodeAgent:
         desc = ", ".join(parts[:2])
         if len(parts) > 2:
             desc += " ..."
-        print(f"\n  {C.BLUE}[tool] {C.BOLD}{name}{C.RESET} {C.GRAY}({desc}){C.RESET}")
+        # Label box for the tool
+        label = f" {C.BOLD}{name}{C.RESET} {C.GRAY}({desc}){C.RESET} "
+        print(f"\n{C.BLUE}>>{C.RESET} {label}")
 
     def show_tool_result(self, result: ToolResult) -> None:
-        """Display tool execution result with a bordered output box."""
+        """Display tool execution result with an output box."""
         if result.cancelled:
-            status = f"{C.YELLOW}X Cancelled{C.RESET}"
+            tag = f"{C.YELLOW}!! Cancelled{C.RESET}"
         elif result.success:
-            status = f"{C.GREEN}v Done{C.RESET}"
+            tag = f"{C.GREEN}>> Success{C.RESET}"
         else:
-            status = f"{C.RED}x Failed{C.RESET}"
-        print(f"  {status} {C.GRAY}({result.duration:.2f}s){C.RESET}")
+            tag = f"{C.RED}>> Failed{C.RESET}"
+        print(f"  {tag} {C.GRAY}({result.duration:.2f}s){C.RESET}")
 
         output = result.output.strip()
         if not output:
             if not result.success and not result.cancelled:
-                print(f"    {C.DIM}(no output){C.RESET}")
+                print(f"    {C.DIM}(empty){C.RESET}")
             return
 
         # Show output in a bordered box
@@ -448,14 +452,14 @@ class CodeAgent:
         lines = output.split("\n")
         max_lines = 15
         display = lines[:max_lines]
-        print(f"  {C.LINE}+{'-' * (w - 2)}+{C.RESET}")
+        print(f"  {C.LINE}+{'.' * (w - 2)}+{C.RESET}")
         for line in display:
             if len(line) > w - 4:
                 line = line[:w - 7] + "..."
             print(f"  {C.LINE}|{C.RESET} {line:<{w - 4}} {C.LINE}|{C.RESET}")
         if len(lines) > max_lines:
-            print(f"  {C.LINE}|{C.RESET} {C.GRAY}... and {len(lines) - max_lines} more lines{C.RESET}  {C.LINE}|{C.RESET}")
-        print(f"  {C.LINE}+{'-' * (w - 2)}+{C.RESET}")
+            print(f"  {C.LINE}|{C.RESET} {C.GRAY}... and {len(lines) - max_lines} more{C.RESET}  {C.LINE}|{C.RESET}")
+        print(f"  {C.LINE}+{'.' * (w - 2)}+{C.RESET}")
 
     def show_summary(self, text: str) -> None:
         """Display the final task summary in a bordered box."""
@@ -938,9 +942,9 @@ class CodeAgent:
             self.show_tool_result(result)
             return True
 
-        # Handle natural language directory change requests (case-insensitive, preserve path case)
+        # Handle natural language dir change (single path token or path with / only)
         go_match = re.match(
-            r'^(?:go|change|navigate|move|switch)\s+(?:to|into|in)\s+(.+)$',
+            r'^(?:go|change|navigate|move|switch)\s+(?:to|into|in)\s+([^\s](?:[^\s]*(?:/[^\s]*)?)?)$',
             inp, re.IGNORECASE
         )
         if go_match:
