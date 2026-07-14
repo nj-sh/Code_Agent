@@ -18,9 +18,10 @@ Key Features:
   • Persistent session memory across restarts
 
 Recommended lightweight models:
-  • qwen2.5-coder:1.5b  — fast, ~1GB VRAM (default)
-  • deepseek-coder:1.3b  — very fast, ~800MB VRAM
+  • qwen2.5-coder:3b    — great balance, ~1.9GB VRAM (default)
+  • qwen2.5:1.5b        — fast, ~1GB VRAM
   • stable-code:3b       — good balance, ~1.8GB VRAM
+  • deepseek-coder:1.3b  — very fast, ~800MB VRAM
   • codegemma:2b         — Google's lightweight coder
   • qwen2.5-coder:7b     — smarter but heavier, ~4GB VRAM
 """
@@ -45,7 +46,7 @@ from typing import Optional
 
 MEMORY_FILE = Path(__file__).parent / "memory.json"
 OLLAMA_URL = "http://localhost:11434/api/chat"
-DEFAULT_MODEL = "qwen2.5-coder:1.5b"
+DEFAULT_MODEL = "qwen2.5-coder:3b"
 COMMAND_TIMEOUT = 120
 MAX_HISTORY = 80
 HOME = os.path.expanduser("~")
@@ -206,6 +207,23 @@ class OllamaClient:
                 spinner.stop()
                 print(f"\n  {C.YELLOW}⛔ Cancelled{C.RESET}")
                 return False, full
+            except urllib.error.HTTPError as http_err:
+                spinner.stop()
+                body = http_err.read().decode()
+                try:
+                    err_body = json.loads(body)
+                    err_msg = err_body.get("error", "")
+                    if err_msg.endswith("not found"):
+                        print(f"\n  {C.RED}✗ Model '{self.model}' not found{C.RESET}")
+                        print(f"  {C.YELLOW}  → Pull it: ollama pull {self.model}{C.RESET}")
+                        print(f"  {C.YELLOW}  → Or switch: :model <name>{C.RESET}")
+                        print(f"  {C.YELLOW}  → List models: ollama list{C.RESET}")
+                        print(f"  {C.YELLOW}  → Run diagnostics: python3 Check.py{C.RESET}")
+                        return False, """
+                except json.JSONDecodeError:
+                    pass
+                print(f"\n  {C.RED}✗ Ollama HTTP {http_err.code} ({err_msg or http_err.reason}){C.RESET}")
+                return False, ""
             except Exception as exc:
                 if attempt < 2:
                     spinner.stop()
@@ -213,6 +231,8 @@ class OllamaClient:
                 else:
                     spinner.stop()
                     print(f"\n  {C.RED}✗ Ollama unreachable ({exc}){C.RESET}")
+                    print(f"  {C.YELLOW}  → Is Ollama running? Try: ollama serve{C.RESET}")
+                    print(f"  {C.YELLOW}  → Run diagnostics: python3 Check.py{C.RESET}")
                     return False, ""
 
         if not started:
@@ -360,6 +380,7 @@ class CodeAgent:
         if memory.get("last_summary"):
             last = memory["last_summary"].split("\n")[0][:60]
             print(f"  {C.GRAY}Last:   {C.DIM}{last}{C.RESET}")
+        print(f"  {C.YELLOW}💡 Tip:{C.RESET} {C.DIM}Run '{C.RESET}{C.CYAN}python3 Check.py{C.RESET}{C.DIM}' to diagnose issues{C.RESET}")
         print(f"  {C.LINE}{'─' * w}{C.RESET}")
 
     def prompt_str(self) -> str:

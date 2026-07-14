@@ -5,7 +5,7 @@
 > AI-assisted development on modest hardware.
 
 ![Version](https://img.shields.io/badge/version-4.0-brightgreen)
-![Model](https://img.shields.io/badge/model-qwen2.5--coder:1.5b-blue)
+![Model](https://img.shields.io/badge/model-qwen2.5--coder:3b-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-yellow)
 
 ---
@@ -28,7 +28,7 @@
 |---|---|
 | **Python 3.8+** | Runtime |
 | **Ollama** | Local LLM server |
-| **A coder model** | e.g., `qwen2.5-coder:1.5b` |
+| **A coder model** | e.g., `qwen2.5-coder:3b` |
 | Unix-like environment | Linux, macOS, Termux |
 
 ---
@@ -40,7 +40,7 @@
 curl -fsSL https://ollama.com/install.sh | sh
 
 # 2. Pull a lightweight coder model
-ollama pull qwen2.5-coder:1.5b
+ollama pull qwen2.5-coder:3b
 
 # 3. Clone and run
 git clone https://github.com/your-username/code-agent.git
@@ -56,7 +56,7 @@ python3 Agent.py
 ╔══════════════════════════════════════════════╗
 ║          ⚡ Code Agent v4                    ║
 ╚══════════════════════════════════════════════╝
-  Model:  qwen2.5-coder:1.5b
+  Model:  qwen2.5-coder:3b
   CWD:    ~/projects
   Memory: memory.json
 ───────────────────────────────────────────────────
@@ -109,9 +109,10 @@ Code Agent is optimized for lightweight Ollama models. Here are good choices:
 
 | Model | Size | VRAM | Speed | Quality |
 |---|---|---|---|---|
-| `qwen2.5-coder:1.5b` | ~1.5B | ~1GB | ⚡ Fast | Good (default) |
+| `qwen2.5-coder:3b` | ~3B | ~1.9GB | 🚀 Fast | Good (default) |
+| `qwen2.5:1.5b` | ~1.5B | ~1GB | ⚡ Fastest | Good |
+| `stable-code:3b` | ~3B | ~1.8GB | 🚀 Fast | Good |
 | `deepseek-coder:1.3b` | ~1.3B | ~800MB | ⚡ Fastest | Good |
-| `stable-code:3b` | ~3B | ~1.8GB | 🚀 Fast | Better |
 | `codegemma:2b` | ~2B | ~1.2GB | 🚀 Fast | Good |
 | `qwen2.5-coder:7b` | ~7B | ~4GB | 🐢 Slower | Best |
 
@@ -180,7 +181,7 @@ ollama serve
 
 ### Model not found
 ```bash
-ollama pull qwen2.5-coder:1.5b
+ollama pull qwen2.5-coder:3b
 ```
 
 ### Permission denied on commands

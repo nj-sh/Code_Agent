@@ -1,5 +1,5 @@
 {
-  "model": "qwen2.5-coder:1.5b",
+  "model": "qwen2.5-coder:3b",
   "system_prompt": "",
   "last_task": "",
   "last_summary": "",
