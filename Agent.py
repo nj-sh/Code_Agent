@@ -167,7 +167,9 @@ class OllamaClient:
         self.model = model
 
     def chat(self, messages: list, temperature: float = 0.1) -> tuple[bool, str]:
-        """Send a chat request and return (success, full_response_text)."""
+        """Send a chat request and return (success, full_response_text).
+        Collects silently (no streaming) - caller handles display.
+        """
         data = json.dumps({
             "model": self.model,
             "messages": messages,
@@ -200,10 +202,6 @@ class OllamaClient:
                             started = True
                             spinner.stop()
                         full += content
-                        sys.stdout.write(content)
-                        sys.stdout.flush()
-                if started:
-                    print()
                 return True, full
 
             except KeyboardInterrupt:
@@ -238,13 +236,12 @@ class OllamaClient:
                     print(f"  {C.YELLOW}  -> Run diagnostics: python3 Check.py{C.RESET}")
                     return False, ""
 
-        if not started:
-            spinner.stop()
+        spinner.stop()
         return started, full
 
 # --- System Prompt -----------------------------------------------------------
 
-SYSTEM_PROMPT =    """You are Code Agent - an autonomous terminal coding assistant powered by Ollama.
+SYSTEM_PROMPT = """You are Code Agent - an autonomous terminal coding assistant powered by Ollama.
 
 You take full ownership of every task. You think, act, and summarize.
 
@@ -764,6 +761,12 @@ class CodeAgent:
 
     # -- Main Execution Loop ------------------------------------------------
 
+    def print_clean_response(self, text: str) -> None:
+        """Print LLM response text with control tags stripped."""
+        clean = self.strip_tool_tags(text)
+        if clean:
+            print(f"\n{clean}")
+
     def execute_task(self, user_input: str) -> Optional[str]:
         """
         Execute a user task through the agentic loop:
@@ -778,21 +781,37 @@ class CodeAgent:
         self.history.append({"role": "assistant", "content": response})
         self._trim_history()
 
-        return self._process_response(response)  # None or summary string
-
-    def _process_response(self, response: str) -> Optional[str]:
-        """
-        Process a single LLM response. Returns a summary string or None.
-        Recursively processes tool call results from the LLM.
-        Note: LLM response text is already streamed to stdout by chat().
-        We only process tool calls and summaries here - no reprinting.
-        """
-        # Check for summary
+        # Check for summary first
         summary = self.extract_summary(response)
         if summary:
             return summary
 
-        # Extract tool calls (text was already streamed, don't reprint)
+        # Check for tool calls
+        tool_calls = self.extract_tool_calls(response)
+        if not tool_calls:
+            # Plain text response - print it clean
+            self.print_clean_response(response)
+            return None
+
+        # Has tool calls - print clean text before first tool call
+        clean = self.strip_tool_tags(response)
+        if clean:
+            # Only show text that came before the first tool call
+            first_call = response.find('<tool_call>')
+            if first_call >= 0:
+                before_tools = response[:first_call].strip()
+                if before_tools:
+                    before_clean = self.strip_tool_tags(before_tools)
+                    if before_clean:
+                        print(f"\n{before_clean}")
+
+        return self._process_response(response)  # None or summary string
+
+    def _process_response(self, response: str) -> Optional[str]:
+        """
+        Process tool calls from an LLM response recursively.
+        Returns a summary string or None.
+        """
         tool_calls = self.extract_tool_calls(response)
         if not tool_calls:
             return None
@@ -869,6 +888,16 @@ class CodeAgent:
             self.show_tool_result(result)
             return True
 
+        # Handle natural language directory change requests (case-insensitive, preserve path case)
+        go_match = re.match(
+            r'^(?:go|change|navigate|move|switch)\s+(?:to|into|in)\s+(.+)$',
+            inp, re.IGNORECASE
+        )
+        if go_match:
+            result = self._handle_cd_tool(go_match.group(1).strip())
+            self.show_tool_result(result)
+            return True
+
         return False
 
     def _show_help(self) -> None:
@@ -920,10 +949,12 @@ class CodeAgent:
 
             # Reset results log for new task
             self.results_log = []
-            self.show_info("Processing task...")
+            self.show_info("Processing...")
 
             # Execute the task through the agentic loop
             summary = self.execute_task(inp)
+
+            print()  # spacer before result
 
             # Show summary if provided
             if summary:
@@ -940,10 +971,10 @@ class CodeAgent:
                 status = f"{C.GREEN}+ {successes} steps succeeded{C.RESET}"
                 if failures:
                     status += f", {C.RED}{failures} failed{C.RESET}"
-                print(f"\n  {C.GRAY}--- Task complete ---{C.RESET}")
+                print(f"  {C.GRAY}--- complete ---{C.RESET}")
                 print(f"  {status}")
                 if total_commands:
-                    print(f"  {C.GRAY}{total_commands} commands executed{C.RESET}")
+                    print(f"  {C.GRAY}{total_commands} commands{C.RESET}")
 
             # Persist state
             self._persist()
