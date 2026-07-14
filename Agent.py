@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-╔══════════════════════════════════════════════════╗
-║          ⚡ Code Agent v4 — Ollama CLI          ║
-╚══════════════════════════════════════════════════╝
++================================================+
+|          * Code Agent v4 - Ollama CLI          |
++================================================+
 
 A lightweight, local-first coding agent powered by Ollama models.
-Inspired by Codex CLI & Claude Code — purpose-built for private,
+Inspired by Codex CLI & Claude Code - purpose-built for private,
 offline AI-assisted development on modest hardware.
 
 Key Features:
-  • Plan → Execute → Summarize workflow
-  • Tool-based execution (think, bash, read, write, edit, search)
-  • Structured terminal UI with clear visual hierarchy
-  • Optimized prompts for small Ollama models (1.5B–7B)
-  • Auto-retry with intelligent error recovery
-  • Persistent session memory across restarts
+  * Plan -> Execute -> Summarize workflow
+  * Tool-based execution (think, bash, read, write, edit, search)
+  * Structured terminal UI with clear visual hierarchy
+  * Optimized prompts for small Ollama models (1.5B-7B)
+  * Auto-retry with intelligent error recovery
+  * Persistent session memory across restarts
 
 Recommended lightweight models:
-  • qwen2.5-coder:3b    — great balance, ~1.9GB VRAM (default)
-  • qwen2.5:1.5b        — fast, ~1GB VRAM
-  • stable-code:3b       — good balance, ~1.8GB VRAM
-  • deepseek-coder:1.3b  — very fast, ~800MB VRAM
-  • codegemma:2b         — Google's lightweight coder
-  • qwen2.5-coder:7b     — smarter but heavier, ~4GB VRAM
+  * qwen2.5-coder:3b    - great balance, ~1.9GB VRAM (default)
+  * qwen2.5:1.5b        - fast, ~1GB VRAM
+  * stable-code:3b       - good balance, ~1.8GB VRAM
+  * deepseek-coder:1.3b  - very fast, ~800MB VRAM
+  * codegemma:2b         - Google's lightweight coder
+  * qwen2.5-coder:7b     - smarter but heavier, ~4GB VRAM
 """
 
 import os
@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-# ─── Configuration ────────────────────────────────────────────────────────────
+# --- Configuration -----------------------------------------------------------
 
 MEMORY_FILE = Path(__file__).parent / "memory.json"
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -52,7 +52,7 @@ MAX_HISTORY = 80
 HOME = os.path.expanduser("~")
 VERSION = "4.0"
 
-# ─── Terminal Colors ──────────────────────────────────────────────────────────
+# --- Terminal Colors ---------------------------------------------------------
 
 
 class Color:
@@ -75,7 +75,7 @@ class Color:
 
 C = Color  # shorthand
 
-# ─── Data Classes ─────────────────────────────────────────────────────────────
+# --- Data Classes ------------------------------------------------------------
 
 
 @dataclass
@@ -89,7 +89,7 @@ class ToolResult:
     cancelled: bool = False
 
 
-# ─── Memory (Persistent State) ────────────────────────────────────────────────
+# --- Memory (Persistent State) -----------------------------------------------
 
 
 def load_memory() -> dict:
@@ -121,7 +121,7 @@ def save_memory(memory: dict) -> None:
 
 memory = load_memory()
 
-# ─── Spinner ──────────────────────────────────────────────────────────────────
+# --- Spinner ----------------------------------------------------------------
 
 
 class Spinner:
@@ -138,13 +138,13 @@ class Spinner:
         self._thread.start()
 
     def _spin(self) -> None:
-        chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        chars = "-\\|/"
         i = 0
         while self._running:
             sys.stdout.write(f"\r{C.THINK}{chars[i]} {self._text}...{C.RESET}")
             sys.stdout.flush()
             i = (i + 1) % len(chars)
-            time.sleep(0.08)
+            time.sleep(0.12)
 
     def stop(self) -> None:
         self._running = False
@@ -153,7 +153,7 @@ class Spinner:
         sys.stdout.write("\r" + " " * 60 + "\r")
         sys.stdout.flush()
 
-# ─── Ollama Client ────────────────────────────────────────────────────────────
+# --- Ollama Client -----------------------------------------------------------
 
 
 class OllamaClient:
@@ -205,7 +205,7 @@ class OllamaClient:
 
             except KeyboardInterrupt:
                 spinner.stop()
-                print(f"\n  {C.YELLOW}⛔ Cancelled{C.RESET}")
+                print(f"\n  {C.YELLOW}X Cancelled{C.RESET}")
                 return False, full
             except urllib.error.HTTPError as http_err:
                 spinner.stop()
@@ -214,15 +214,15 @@ class OllamaClient:
                     err_body = json.loads(body)
                     err_msg = err_body.get("error", "")
                     if err_msg.endswith("not found"):
-                        print(f"\n  {C.RED}✗ Model '{self.model}' not found{C.RESET}")
-                        print(f"  {C.YELLOW}  → Pull it: ollama pull {self.model}{C.RESET}")
-                        print(f"  {C.YELLOW}  → Or switch: :model <name>{C.RESET}")
-                        print(f"  {C.YELLOW}  → List models: ollama list{C.RESET}")
-                        print(f"  {C.YELLOW}  → Run diagnostics: python3 Check.py{C.RESET}")
-                        return False, """
+                        print(f"\n  {C.RED}x Model '{self.model}' not found{C.RESET}")
+                        print(f"  {C.YELLOW}  -> Pull it: ollama pull {self.model}{C.RESET}")
+                        print(f"  {C.YELLOW}  -> Or switch: :model <name>{C.RESET}")
+                        print(f"  {C.YELLOW}  -> List models: ollama list{C.RESET}")
+                        print(f"  {C.YELLOW}  -> Run diagnostics: python3 Check.py{C.RESET}")
+                        return False, ""
                 except json.JSONDecodeError:
                     pass
-                print(f"\n  {C.RED}✗ Ollama HTTP {http_err.code} ({err_msg or http_err.reason}){C.RESET}")
+                print(f"\n  {C.RED}x Ollama HTTP {http_err.code} ({err_msg or http_err.reason}){C.RESET}")
                 return False, ""
             except Exception as exc:
                 if attempt < 2:
@@ -230,25 +230,25 @@ class OllamaClient:
                     time.sleep(1)
                 else:
                     spinner.stop()
-                    print(f"\n  {C.RED}✗ Ollama unreachable ({exc}){C.RESET}")
-                    print(f"  {C.YELLOW}  → Is Ollama running? Try: ollama serve{C.RESET}")
-                    print(f"  {C.YELLOW}  → Run diagnostics: python3 Check.py{C.RESET}")
+                    print(f"\n  {C.RED}x Ollama unreachable ({exc}){C.RESET}")
+                    print(f"  {C.YELLOW}  -> Is Ollama running? Try: ollama serve{C.RESET}")
+                    print(f"  {C.YELLOW}  -> Run diagnostics: python3 Check.py{C.RESET}")
                     return False, ""
 
         if not started:
             spinner.stop()
         return started, full
 
-# ─── System Prompt ────────────────────────────────────────────────────────────
+# --- System Prompt -----------------------------------------------------------
 
-SYSTEM_PROMPT = """You are Code Agent — an autonomous terminal coding assistant powered by Ollama.
+SYSTEM_PROMPT = """You are Code Agent - an autonomous terminal coding assistant powered by Ollama.
 
 You take full ownership of every task. You think, act, and summarize.
 
 ## Workflow
-1. **Think** — Plan your approach before executing
-2. **Execute** — Use tools one at a time, waiting for results
-3. **Summarize** — When done, output a concise summary
+1. **Think** - Plan your approach before executing
+2. **Execute** - Use tools one at a time, waiting for results
+3. **Summarize** - When done, output a concise summary
 
 ## Available Tools
 
@@ -265,7 +265,7 @@ Internal reasoning. Plan your steps here.
 ### `execute_command`
 Run any bash command. Returns stdout/stderr + exit code.
 - Args: `command` (str)
-- Note: `cd` is handled internally — directory changes persist.
+- Note: `cd` is handled internally - directory changes persist.
 
 ### `read_file`
 Read a file's contents.
@@ -291,18 +291,18 @@ Search for a pattern in files (uses rg or grep).
 5. When the task is complete, output:
 
 <summary>
-✅ **Task Complete**
+[v] **Task Complete**
 - What was accomplished
 - Key results
 </summary>
 
 6. Be concise. Let your actions speak for themselves."""
 
-# ─── Agent Core ───────────────────────────────────────────────────────────────
+# --- Agent Core --------------------------------------------------------------
 
 
 class CodeAgent:
-    """Main agent class — manages LLM conversation, tool execution, and UI."""
+    """Main agent class - manages LLM conversation, tool execution, and UI."""
 
     TOOL_CALL_RE = re.compile(
         r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL
@@ -321,7 +321,7 @@ class CodeAgent:
         self.width = shutil.get_terminal_size((80, 24)).columns
         self._init_history()
 
-    # ── History Management ──────────────────────────────────────────────────
+    # -- History Management -------------------------------------------------
 
     def _init_history(self) -> None:
         """Build the conversation history from saved state."""
@@ -364,39 +364,39 @@ class CodeAgent:
             / 0.75
         )
 
-    # ── Terminal UI ─────────────────────────────────────────────────────────
+    # -- Terminal UI --------------------------------------------------------
 
     def print_header(self) -> None:
         """Render the startup banner."""
         w = min(self.width, 64)
-        print(f"\n{C.BOLD}{C.CYAN}╔{'═' * (w - 2)}╗{C.RESET}")
-        title = "⚡ Code Agent v4"
+        print(f"\n{C.BOLD}{C.CYAN}+{'=' * (w - 2)}+{C.RESET}")
+        title = "* Code Agent v4"
         pad = (w - 2 - len(title)) // 2
-        print(f"{C.BOLD}{C.CYAN}║{' ' * pad}{title}{' ' * (w - 2 - len(title) - pad)}║{C.RESET}")
-        print(f"{C.BOLD}{C.CYAN}╚{'═' * (w - 2)}╝{C.RESET}")
+        print(f"{C.BOLD}{C.CYAN}|{' ' * pad}{title}{' ' * (w - 2 - len(title) - pad)}|{C.RESET}")
+        print(f"{C.BOLD}{C.CYAN}+{'=' * (w - 2)}+{C.RESET}")
         print(f"  {C.GRAY}Model:  {C.YELLOW}{self.model}{C.RESET}")
         print(f"  {C.GRAY}CWD:    {C.CYAN}{self.cwd.replace(HOME, '~')}{C.RESET}")
         print(f"  {C.GRAY}Memory: {C.DIM}{MEMORY_FILE.name}{C.RESET}")
         if memory.get("last_summary"):
             last = memory["last_summary"].split("\n")[0][:60]
             print(f"  {C.GRAY}Last:   {C.DIM}{last}{C.RESET}")
-        print(f"  {C.YELLOW}💡 Tip:{C.RESET} {C.DIM}Run '{C.RESET}{C.CYAN}python3 Check.py{C.RESET}{C.DIM}' to diagnose issues{C.RESET}")
-        print(f"  {C.LINE}{'─' * w}{C.RESET}")
+        print(f"  {C.YELLOW}[i] Tip:{C.RESET} {C.DIM}Run '{C.RESET}{C.CYAN}python3 Check.py{C.RESET}{C.DIM}' to diagnose issues{C.RESET}")
+        print(f"  {C.LINE}{'-' * w}{C.RESET}")
 
     def prompt_str(self) -> str:
         """Build the input prompt with directory and token count."""
         p = self.cwd.replace(HOME, "~")
         t = self.estimate_tokens()
-        return f"{C.CYAN}{p}{C.RESET} {C.TOKEN}[{t}t]{C.RESET} {C.GREEN}❯{C.RESET} "
+        return f"{C.CYAN}{p}{C.RESET} {C.TOKEN}[{t}t]{C.RESET} {C.GREEN}>{C.RESET} "
 
     def show_thinking(self, thought: str) -> None:
         """Display a thinking block with reasoning."""
         w = min(self.width, 64)
-        print(f"\n{C.THINK}┌ {'💭 Thinking':<{w - 4}}┐{C.RESET}")
+        print(f"\n{C.THINK}+- {'Thinking':<{w - 6}} -+{C.RESET}")
         for line in thought.strip().split("\n"):
             for wl in textwrap.wrap(line, width=w - 6):
-                print(f"{C.THINK}│ {wl:<{w - 4}}│{C.RESET}")
-        print(f"{C.THINK}└{'─' * (w - 2)}┘{C.RESET}")
+                print(f"{C.THINK}| {wl:<{w - 4}} |{C.RESET}")
+        print(f"{C.THINK}+{'-' * (w - 2)}+{C.RESET}")
 
     def show_tool_call(self, name: str, args: dict) -> None:
         """Display a tool invocation."""
@@ -410,16 +410,16 @@ class CodeAgent:
         desc = ", ".join(parts[:2])
         if len(parts) > 2:
             desc += " ..."
-        print(f"\n  {C.BLUE}🔧 {C.BOLD}{name}{C.RESET} {C.GRAY}({desc}){C.RESET}")
+        print(f"\n  {C.BLUE}[tool] {C.BOLD}{name}{C.RESET} {C.GRAY}({desc}){C.RESET}")
 
     def show_tool_result(self, result: ToolResult) -> None:
         """Display tool execution result with truncated output."""
         if result.cancelled:
-            status = f"{C.YELLOW}⛔ Cancelled{C.RESET}"
+            status = f"{C.YELLOW}X Cancelled{C.RESET}"
         elif result.success:
-            status = f"{C.GREEN}✓ Done{C.RESET}"
+            status = f"{C.GREEN}v Done{C.RESET}"
         else:
-            status = f"{C.RED}✗ Failed{C.RESET}"
+            status = f"{C.RED}x Failed{C.RESET}"
         print(f"  {status} {C.GRAY}({result.duration:.2f}s){C.RESET}")
 
         output = result.output.strip()
@@ -441,21 +441,21 @@ class CodeAgent:
     def show_summary(self, text: str) -> None:
         """Display the final task summary in a bordered box."""
         w = min(self.width, 64)
-        print(f"\n{C.GREEN}┌{'─' * (w - 2)}┐{C.RESET}")
+        print(f"\n{C.GREEN}+{'-' * (w - 2)}+{C.RESET}")
         for line in text.strip().split("\n"):
             for wl in textwrap.wrap(line, width=w - 4):
-                print(f"{C.GREEN}│ {wl:<{w - 4}}│{C.RESET}")
-        print(f"{C.GREEN}└{'─' * (w - 2)}┘{C.RESET}")
+                print(f"{C.GREEN}| {wl:<{w - 4}} |{C.RESET}")
+        print(f"{C.GREEN}+{'-' * (w - 2)}+{C.RESET}")
 
     def show_error(self, msg: str) -> None:
         """Display an error message."""
-        print(f"  {C.RED}✗ {msg}{C.RESET}")
+        print(f"  {C.RED}x {msg}{C.RESET}")
 
     def show_info(self, msg: str) -> None:
         """Display an info message."""
         print(f"  {C.GRAY}{msg}{C.RESET}")
 
-    # ── Tool Implementations ────────────────────────────────────────────────
+    # -- Tool Implementations -----------------------------------------------
 
     def tool_execute_command(self, command: str) -> ToolResult:
         """Run a bash command, capture output, handle cd specially."""
@@ -485,7 +485,7 @@ class CodeAgent:
                 ec = proc.returncode
             except subprocess.TimeoutExpired:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                out = "⏱ Timeout reached"
+                out = "[timeout] Timeout reached"
                 ec = -1
         except KeyboardInterrupt:
             if self.running_proc and self.running_proc.poll() is None:
@@ -493,7 +493,7 @@ class CodeAgent:
                     os.killpg(os.getpgid(self.running_proc.pid), signal.SIGKILL)
                 except Exception:
                     self.running_proc.kill()
-            out = "⛔ Cancelled"
+            out = "X Cancelled"
             cancelled = True
             ec = -1
             print()
@@ -523,12 +523,12 @@ class CodeAgent:
             self.cwd = os.getcwd()
             self._update_cwd_in_prompt()
             return ToolResult(
-                True,
-                f"→ {self.cwd.replace(HOME, '~')}",
-                time.time() - t0,
-                "execute_command",
-                {"command": f"cd {path}"},
-            )
+            True,
+            f"-> {self.cwd.replace(HOME, '~')}",
+            time.time() - t0,
+            "execute_command",
+            {"command": f"cd {path}"},
+        )
 
         # Fuzzy match
         for entry in os.listdir(os.path.dirname(test) or "."):
@@ -542,7 +542,7 @@ class CodeAgent:
                 self._update_cwd_in_prompt()
                 return ToolResult(
                     True,
-                    f"→ '{entry}'\n📍 {self.cwd.replace(HOME, '~')}",
+                    f"-> '{entry}'\n> {self.cwd.replace(HOME, '~')}",
                     time.time() - t0,
                     "execute_command",
                     {"command": f"cd {path}"},
@@ -646,7 +646,7 @@ class CodeAgent:
                               "search_code",
                               {"pattern": pattern, "path": path})
 
-    # ── Tool Dispatch ───────────────────────────────────────────────────────
+    # -- Tool Dispatch ------------------------------------------------------
 
     def dispatch_tool(self, name: str, args: dict) -> ToolResult:
         """Route a tool call to the correct handler."""
@@ -681,7 +681,7 @@ class CodeAgent:
 
         return handler(*handler_args)
 
-    # ── Tool Call Extraction ────────────────────────────────────────────────
+    # -- Tool Call Extraction -----------------------------------------------
 
     def extract_tool_calls(self, text: str) -> list[dict]:
         """Extract all tool call JSON objects from AI response."""
@@ -706,12 +706,12 @@ class CodeAgent:
         text = self.SUMMARY_RE.sub("", text)
         return text.strip()
 
-    # ── Main Execution Loop ─────────────────────────────────────────────────
+    # -- Main Execution Loop ------------------------------------------------
 
     def execute_task(self, user_input: str) -> Optional[str]:
         """
         Execute a user task through the agentic loop:
-        Send input → LLM responds → execute tools → feed back → summary
+        Send input -> LLM responds -> execute tools -> feed back -> summary
         """
         self.history.append({"role": "user", "content": user_input})
 
@@ -789,7 +789,7 @@ class CodeAgent:
         # All tool calls processed, no summary found
         return None
 
-    # ── Direct Commands ────────────────────────────────────────────────────
+    # -- Direct Commands ---------------------------------------------------
 
     def handle_direct(self, inp: str) -> bool:
         """Handle commands that don't need the LLM. Returns True if handled."""
@@ -810,7 +810,7 @@ class CodeAgent:
             self.client.model = new_model
             memory["model"] = new_model
             self._persist()
-            print(f"  {C.GREEN}✓ Switched to {C.YELLOW}{new_model}{C.RESET}")
+            print(f"  {C.GREEN}+ Switched to {C.YELLOW}{new_model}{C.RESET}")
             return True
 
         # Cd is handled as a direct command for speed
@@ -825,11 +825,11 @@ class CodeAgent:
     def _show_help(self) -> None:
         """Display the help menu."""
         w = min(self.width, 56)
-        print(f"\n{C.CYAN}╔{'═' * (w - 2)}╗{C.RESET}")
-        print(f"{C.CYAN}║{'  ⚡ Code Agent Commands':<{w - 2}}║{C.RESET}")
-        print(f"{C.CYAN}╚{'═' * (w - 2)}╝{C.RESET}")
+        print(f"\n{C.CYAN}+{'=' * (w - 2)}+{C.RESET}")
+        print(f"{C.CYAN}|{'  * Code Agent Commands':<{w - 2}}|{C.RESET}")
+        print(f"{C.CYAN}+{'=' * (w - 2)}+{C.RESET}")
         print(f"  {C.GREEN}<describe your task>{C.RESET}")
-        print(f"    Tell me what you want done — I'll plan and execute")
+        print(f"    Tell me what you want done - I'll plan and execute")
         print(f"\n  {C.GREEN}cd <path>{C.RESET}")
         print(f"    Change directory (with fuzzy matching)")
         print(f"\n  {C.GREEN}:model <name>{C.RESET}")
@@ -838,12 +838,12 @@ class CodeAgent:
         print(f"  {C.GREEN}:clear{C.RESET}   Clear screen")
         print(f"  {C.GREEN}exit{C.RESET}     Save and quit")
         print(f"\n  {C.GRAY}Tips:{C.RESET}")
-        print(f"  {C.GRAY}• Be specific about what you want{C.RESET}")
-        print(f"  {C.GRAY}• For multi-step tasks, I'll create a plan{C.RESET}")
-        print(f"  {C.GRAY}• I'll summarize results when done{C.RESET}")
+        print(f"  {C.GRAY}* Be specific about what you want{C.RESET}")
+        print(f"  {C.GRAY}* For multi-step tasks, I'll create a plan{C.RESET}")
+        print(f"  {C.GRAY}* I'll summarize results when done{C.RESET}")
         print()
 
-    # ── Main Run Loop ──────────────────────────────────────────────────────
+    # -- Main Run Loop -----------------------------------------------------
 
     def run(self) -> None:
         """Main REPL loop."""
@@ -862,7 +862,7 @@ class CodeAgent:
 
             if inp.lower() == "exit":
                 self._persist()
-                print(f"\n  {C.GREEN}👋 Bye! Session saved.{C.RESET}")
+                print(f"\n  {C.GREEN}Bye! Session saved.{C.RESET}")
                 break
 
             # Handle direct commands
@@ -888,12 +888,10 @@ class CodeAgent:
                 total_commands = sum(
                     1 for r in self.results_log if r.tool == "execute_command"
                 )
-                status = f"{C.GREEN}✓ {successes} steps succeeded{C.RESET}"
+                status = f"{C.GREEN}+ {successes} steps succeeded{C.RESET}"
                 if failures:
                     status += f", {C.RED}{failures} failed{C.RESET}"
-                print(
-                    f"\n  {C.GRAY}━━━ Task complete ─━━{C.RESET}"
-                )
+                print(f"\n  {C.GRAY}--- Task complete ---{C.RESET}")
                 print(f"  {status}")
                 if total_commands:
                     print(f"  {C.GRAY}{total_commands} commands executed{C.RESET}")

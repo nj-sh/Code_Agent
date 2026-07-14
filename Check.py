@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-╔══════════════════════════════════════════════════╗
-║    🔍 Code Agent — Pre-Flight Check             ║
-╚══════════════════════════════════════════════════╝
++================================================+
+|    [check] Code Agent - Pre-Flight Check       |
++================================================+
 
 Diagnoses issues before running Agent.py.
 Checks Python, Ollama, model, tools, and permissions.
@@ -16,14 +16,13 @@ Usage:
 import json
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import urllib.request
 import urllib.error
 from pathlib import Path
 
-# ─── ANSI Colors ──────────────────────────────────────────────────────────────
+# --- ANSI Colors -------------------------------------------------------------
 
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -34,13 +33,13 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 DIM = "\033[2m"
 
-# ─── Config ───────────────────────────────────────────────────────────────────
+# --- Config ------------------------------------------------------------------
 
 OLLAMA_URL = "http://localhost:11434"
 MEMORY_FILE = Path(__file__).parent / "memory.json"
 MIN_PYTHON = (3, 8)
 
-# ─── Results ──────────────────────────────────────────────────────────────────
+# --- Results -----------------------------------------------------------------
 
 passed = 0
 failed = 0
@@ -50,21 +49,21 @@ skipped = 0
 def ok(msg: str) -> None:
     global passed
     passed += 1
-    print(f"  {GREEN}✓{RESET} {msg}")
+    print(f"  {GREEN}+{RESET} {msg}")
 
 
 def fail(msg: str, hint: str = "") -> bool:
     """Report failure and ask Y/N. Returns True if user wants to continue."""
     global failed
     failed += 1
-    print(f"  {RED}✗{RESET} {msg}")
+    print(f"  {RED}x{RESET} {msg}")
     if hint:
-        print(f"    {YELLOW}💡 {hint}{RESET}")
+        print(f"    {YELLOW}[i] {hint}{RESET}")
     while True:
         try:
             ans = input(f"    {YELLOW}Continue anyway? [y/N]: {RESET}").strip().lower()
             if ans in ("y", "yes"):
-                print(f"    {DIM}→ Continuing...{RESET}")
+                print(f"    {DIM}-> Continuing...{RESET}")
                 return True
             if ans in ("", "n", "no"):
                 return False
@@ -75,24 +74,24 @@ def fail(msg: str, hint: str = "") -> bool:
 def skip(msg: str) -> None:
     global skipped
     skipped += 1
-    print(f"  {YELLOW}−{RESET} {msg}")
+    print(f"  {YELLOW}-{RESET} {msg}")
 
 
-# ─── Header ───────────────────────────────────────────────────────────────────
+# --- Header ------------------------------------------------------------------
 
 
 def print_header() -> None:
     w = shutil.get_terminal_size((60, 20)).columns
     w = min(w, 66)
-    print(f"\n{BOLD}{CYAN}╔{'═' * (w - 2)}╗{RESET}")
-    title = "🔍 Code Agent — Pre-Flight Check"
+    print(f"\n{BOLD}{CYAN}+{'=' * (w - 2)}+{RESET}")
+    title = "[check] Code Agent - Pre-Flight Check"
     pad = (w - 2 - len(title)) // 2
-    print(f"{BOLD}{CYAN}║{' ' * pad}{title}{' ' * (w - 2 - len(title) - pad)}║{RESET}")
-    print(f"{BOLD}{CYAN}╚{'═' * (w - 2)}╝{RESET}")
+    print(f"{BOLD}{CYAN}|{' ' * pad}{title}{' ' * (w - 2 - len(title) - pad)}|{RESET}")
+    print(f"{BOLD}{CYAN}+{'=' * (w - 2)}+{RESET}")
     print()
 
 
-# ─── Checks ────────────────────────────────────────────────────────────────────
+# --- Checks ------------------------------------------------------------------
 
 
 def check_python() -> bool:
@@ -100,10 +99,10 @@ def check_python() -> bool:
     v = sys.version_info
     ver_str = f"{v.major}.{v.minor}.{v.micro}"
     if (v.major, v.minor) >= MIN_PYTHON:
-        ok(f"Python {ver_str} (≥ {MIN_PYTHON[0]}.{MIN_PYTHON[1]})")
+        ok(f"Python {ver_str} (>= {MIN_PYTHON[0]}.{MIN_PYTHON[1]})")
         return True
     return fail(
-        f"Python {ver_str} — need ≥ {MIN_PYTHON[0]}.{MIN_PYTHON[1]}",
+        f"Python {ver_str} - need >= {MIN_PYTHON[0]}.{MIN_PYTHON[1]}",
         "Install a newer Python from https://python.org",
     )
 
@@ -118,7 +117,7 @@ def check_ollama_installed() -> bool:
                 capture_output=True, text=True, timeout=10,
             )
             ver_out = ver.stdout.strip() or ver.stderr.strip() or "(unknown version)"
-            ok(f"Ollama binary found — {ver_out}")
+            ok(f"Ollama binary found - {ver_out}")
             return True
         except Exception as e:
             skip(f"Ollama binary found but version check failed: {e}")
@@ -144,7 +143,7 @@ def check_ollama_running() -> bool:
                 )
     except urllib.error.URLError as e:
         return fail(
-            f"Ollama API unreachable — {e.reason}",
+            f"Ollama API unreachable - {e.reason}",
             "Start Ollama: ollama serve\n"
             "  Or install: curl -fsSL https://ollama.com/install.sh | sh",
         )
@@ -197,7 +196,7 @@ def check_tools() -> bool:
     grep_path = shutil.which("grep")
 
     if rg_path:
-        ok("ripgrep (rg) available — fast code search")
+        ok("ripgrep (rg) available - fast code search")
     elif grep_path:
         skip("ripgrep not found, falling back to grep (slower)")
     else:
@@ -279,7 +278,7 @@ def check_disk_space() -> bool:
         return True
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# --- Main --------------------------------------------------------------------
 
 
 def main() -> int:
@@ -306,14 +305,14 @@ def main() -> int:
         print(f" {BOLD}{label}{RESET}")
         proceed = check_fn()
         if not proceed:
-            print(f"\n  {RED}❌ Aborting — fix the issue above and re-run.{RESET}")
+            print(f"\n  {RED}X Aborting - fix the issue above and re-run.{RESET}")
             return 1
         print()
 
-    # ── Summary ─────────────────────────────────────────────────────────────
+    # --- Summary -------------------------------------------------------------
     total = passed + failed + skipped
     w = min(shutil.get_terminal_size((60, 20)).columns, 66)
-    print(f" {CYAN}{'─' * (w - 2)}{RESET}")
+    print(f" {CYAN}{'-' * (w - 2)}{RESET}")
     print(f" {BOLD}Results: "
           f"{GREEN}{passed} passed{RESET}, "
           f"{RED}{failed} failed{RESET}, "
@@ -322,12 +321,12 @@ def main() -> int:
     print()
 
     if failed == 0:
-        print(f" {GREEN}{BOLD}✅ All checks passed! You're ready to run:{RESET}")
+        print(f" {GREEN}{BOLD}[v] All checks passed! You're ready to run:{RESET}")
         print(f" {CYAN}    python3 Agent.py{RESET}")
         print()
         return 0
     else:
-        print(f" {YELLOW}{BOLD}⚠️  {failed} check(s) failed (you chose to continue).{RESET}")
+        print(f" {YELLOW}{BOLD}[!] {failed} check(s) failed (you chose to continue).{RESET}")
         print(f" {YELLOW}   Some features may not work correctly.{RESET}")
         print()
         return 0
