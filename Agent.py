@@ -56,21 +56,24 @@ VERSION = "4.0"
 
 
 class Color:
-    """ANSI color codes for structured terminal output."""
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    GRAY = "\033[90m"
+    """ANSI color codes for green/black/orange terminal theme."""
+    ORANGE = "\033[38;5;214m"  # main accent for borders, headers, dir
+    GREEN = "\033[92m"          # success, prompts
+    YELLOW = "\033[93m"         # warnings, tips
+    RED = "\033[91m"            # errors
+    GRAY = "\033[90m"           # secondary info
     BOLD = "\033[1m"
     RESET = "\033[0m"
     DIM = "\033[2m"
     ITALIC = "\033[3m"
-    BLUE = "\033[94m"
-    MAGENTA = "\033[95m"
+    BLUE = "\033[38;5;214m"    # same orange for tool calls
+    MAGENTA = "\033[38;5;205m"
     THINK = "\033[38;5;245m"
-    TOKEN = "\033[38;5;221m"
+    TOKEN = "\033[38;5;214m"    # orange for token count
     LINE = "\033[38;5;236m"
+
+    # Aliases for theme clarity
+    CYAN = ORANGE  # CYAN now points to orange for the theme
 
 
 C = Color  # shorthand
@@ -241,7 +244,7 @@ class OllamaClient:
 
 # --- System Prompt -----------------------------------------------------------
 
-SYSTEM_PROMPT = """You are Code Agent - an autonomous terminal coding assistant powered by Ollama.
+SYSTEM_PROMPT =    """You are Code Agent - an autonomous terminal coding assistant powered by Ollama.
 
 You take full ownership of every task. You think, act, and summarize.
 
@@ -266,6 +269,11 @@ Internal reasoning. Plan your steps here.
 Run any bash command. Returns stdout/stderr + exit code.
 - Args: `command` (str)
 - Note: `cd` is handled internally - directory changes persist.
+
+### `execute_file`
+Execute a script file as a bash command. Returns stdout/stderr + exit code.
+- Args: `path` (str) - path to the script file to execute
+- Note: File is read, made executable if needed, then run with bash.
 
 ### `read_file`
 Read a file's contents.
@@ -523,12 +531,12 @@ class CodeAgent:
             self.cwd = os.getcwd()
             self._update_cwd_in_prompt()
             return ToolResult(
-            True,
-            f"-> {self.cwd.replace(HOME, '~')}",
-            time.time() - t0,
-            "execute_command",
-            {"command": f"cd {path}"},
-        )
+                True,
+                f"-> {self.cwd.replace(HOME, '~')}",
+                time.time() - t0,
+                "execute_command",
+                {"command": f"cd {path}"},
+            )
 
         # Fuzzy match
         for entry in os.listdir(os.path.dirname(test) or "."):
@@ -560,6 +568,53 @@ class CodeAgent:
             "execute_command",
             {"command": f"cd {path}"},
         )
+
+    def tool_execute_file(self, path: str) -> ToolResult:
+        """Execute a script file as a bash command."""
+        t0 = time.time()
+        try:
+            full = path if os.path.isabs(path) else os.path.join(self.cwd, path)
+            if not os.path.isfile(full):
+                return ToolResult(
+                    False, f"File not found: {path}",
+                    time.time() - t0, "execute_file", {"path": path}
+                )
+            # Read the file
+            with open(full) as f:
+                script = f.read()
+            if not script.strip():
+                return ToolResult(
+                    False, f"File is empty: {path}",
+                    time.time() - t0, "execute_file", {"path": path}
+                )
+            # Run via bash (no execute bit needed)
+            proc = subprocess.Popen(
+                ["bash", full],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=self.cwd,
+                preexec_fn=os.setsid,
+            )
+            try:
+                out, _ = proc.communicate(timeout=COMMAND_TIMEOUT)
+                ec = proc.returncode
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                out = "[timeout] Timeout reached"
+                ec = -1
+            return ToolResult(
+                success=(ec == 0),
+                output=out.strip(),
+                duration=time.time() - t0,
+                tool="execute_file",
+                args={"path": path},
+            )
+        except Exception as exc:
+            return ToolResult(
+                False, str(exc),
+                time.time() - t0, "execute_file", {"path": path}
+            )
 
     def tool_read_file(self, path: str) -> ToolResult:
         """Read a file from disk."""
@@ -652,6 +707,7 @@ class CodeAgent:
         """Route a tool call to the correct handler."""
         dispatch = {
             "execute_command": ("command",),
+            "execute_file": ("path",),
             "read_file": ("path",),
             "write_file": ("path", "content"),
             "edit_file": ("path", "old_string", "new_string"),
@@ -728,25 +784,18 @@ class CodeAgent:
         """
         Process a single LLM response. Returns a summary string or None.
         Recursively processes tool call results from the LLM.
+        Note: LLM response text is already streamed to stdout by chat().
+        We only process tool calls and summaries here - no reprinting.
         """
         # Check for summary
         summary = self.extract_summary(response)
         if summary:
             return summary
 
-        # Extract tool calls
+        # Extract tool calls (text was already streamed, don't reprint)
         tool_calls = self.extract_tool_calls(response)
         if not tool_calls:
-            # Text-only response
-            clean = self.strip_tool_tags(response)
-            if clean:
-                print(f"\n  {clean}")
             return None
-
-        # Show any non-tool-call text
-        clean = self.strip_tool_tags(response)
-        if clean:
-            print(f"\n  {clean}")
 
         # Execute each tool call sequentially
         for tc in tool_calls:
