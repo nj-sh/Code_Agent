@@ -839,16 +839,17 @@ class CodeAgent:
                 self.show_thinking(args.get("thought", ""))
                 continue
 
+            # Show tool call details first
+            self.show_tool_call(name, args)
+
             # Manual mode: ask for confirmation
             if self.mode == "manual":
-                action_desc = f"{C.BLUE}[tool] {C.BOLD}{name}{C.RESET}"
                 try:
-                    confirm = input(f"\n  {action_desc} - Run this? [Y/n]: ").strip().lower()
+                    confirm = input(f"  {C.YELLOW}Run this? [Y/n]: {C.RESET}").strip().lower()
                 except (EOFError, KeyboardInterrupt):
                     confirm = "n"
                 if confirm not in ("", "y", "yes"):
                     print(f"  {C.YELLOW}X Skipped{C.RESET}")
-                    # Still feed back to LLM so it knows
                     self.history.append({"role": "user", "content": f"User skipped tool: {name}"})
                     ok, next_resp = self.client.chat(self.history)
                     if ok:
@@ -859,7 +860,6 @@ class CodeAgent:
                             return sub_result
                     continue
 
-            self.show_tool_call(name, args)
             result = self.dispatch_tool(name, args)
             self.show_tool_result(result)
             self.results_log.append(result)
@@ -962,15 +962,15 @@ class CodeAgent:
         print(f"    Change directory (with fuzzy matching)")
         print(f"  {C.GREEN}go to <path>{C.RESET}")
         print(f"    Natural language directory change")
-        print(f"\n  {C.GREEN}:model / /model <name>{C.RESET}")
+        print(f"\n  {C.GREEN}:model or /model <name>{C.RESET}")
         print(f"    Switch Ollama model")
-        print(f"  {C.GREEN}:auto / /auto{C.RESET}")
+        print(f"  {C.GREEN}:auto or /auto{C.RESET}")
         print(f"    Auto mode - execute tools without asking")
-        print(f"  {C.GREEN}:manual / /manual{C.RESET}")
+        print(f"  {C.GREEN}:manual or /manual{C.RESET}")
         print(f"    Manual mode - confirm each tool before running")
-        print(f"\n  {C.GREEN}:help / /help{C.RESET}   Show this help")
-        print(f"  {C.GREEN}:clear / /clear{C.RESET}  Clear screen")
-        print(f"  {C.GREEN}:exit / /exit{C.RESET}   Save and quit")
+        print(f"\n  {C.GREEN}:help or /help{C.RESET}   Show this help")
+        print(f"  {C.GREEN}:clear or /clear{C.RESET}  Clear screen")
+        print(f"  {C.GREEN}:exit or /exit{C.RESET}   Save and quit")
         print(f"\n  {C.GRAY}Tips:{C.RESET}")
         print(f"  {C.GRAY}* Be specific about what you want{C.RESET}")
         print(f"  {C.GRAY}* Use :manual to review each step{C.RESET}")
@@ -992,6 +992,11 @@ class CodeAgent:
                 continue
 
             if not inp:
+                continue
+
+            # Hint for plain "exit" - must use /exit
+            if inp.lower() in ("exit", ":q", "quit"):
+                print(f"  {C.YELLOW}Use /exit or :exit to quit{C.RESET}")
                 continue
 
             # Handle direct commands (including /exit)
