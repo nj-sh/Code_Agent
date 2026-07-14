@@ -128,9 +128,9 @@ memory = load_memory()
 
 
 class Spinner:
-    """Minimal async spinner for LLM wait states."""
+    """Animated dots spinner for LLM wait states."""
 
-    def __init__(self, text: str = "thinking"):
+    def __init__(self, text: str = "Thinking"):
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._text = text
@@ -141,13 +141,13 @@ class Spinner:
         self._thread.start()
 
     def _spin(self) -> None:
-        chars = "-\\|/"
+        frames = ["●○○○", "○●○○", "○○●○", "○○○●"]
         i = 0
         while self._running:
-            sys.stdout.write(f"\r{C.THINK}{chars[i]} {self._text}...{C.RESET}")
+            sys.stdout.write(f"\r{C.ORANGE}{frames[i]} {self._text}{C.RESET}")
             sys.stdout.flush()
-            i = (i + 1) % len(chars)
-            time.sleep(0.12)
+            i = (i + 1) % len(frames)
+            time.sleep(0.15)
 
     def stop(self) -> None:
         self._running = False
@@ -243,12 +243,20 @@ class OllamaClient:
 
 SYSTEM_PROMPT = """You are Code Agent - an autonomous terminal coding assistant powered by Ollama.
 
-You take full ownership of every task. You think, act, and summarize.
+## CRITICAL: You MUST use tools to do work. NEVER just say you did something without calling the tool.
 
-## Workflow
-1. **Think** - Plan your approach before executing
-2. **Execute** - Use tools one at a time, waiting for results
-3. **Summarize** - When done, output a concise summary
+Example BAD response (do NOT do this):
+I will list the files in this directory.
+<summary>Done - listed files</summary>
+
+Example GOOD response:
+<tool_call>{"name": "think", "args": {"thought": "I need to list files using execute_command with ls -la"}}</tool_call>
+<tool_call>{"name": "execute_command", "args": {"command": "ls -la"}}</tool_call>
+
+## Workflow (MANDATORY)
+1. **think** - Call the think tool to plan your approach and make a TODO list
+2. **Execute ONE tool at a time** - Wait for the result before proceeding to next step
+3. **Summarize** - Only when ALL steps are done, output <summary>...</summary>
 
 ## Available Tools
 
@@ -259,8 +267,8 @@ Output tool calls as JSON inside `<tool_call>` tags:
 </tool_call>
 
 ### `think`
-Internal reasoning. Plan your steps here.
-- Args: `thought` (str)
+Plan your approach. ALWAYS start with this.
+- Args: `thought` (str) - your reasoning and TODO list
 
 ### `execute_command`
 Run any bash command. Returns stdout/stderr + exit code.
@@ -268,9 +276,8 @@ Run any bash command. Returns stdout/stderr + exit code.
 - Note: `cd` is handled internally - directory changes persist.
 
 ### `execute_file`
-Execute a script file as a bash command. Returns stdout/stderr + exit code.
-- Args: `path` (str) - path to the script file to execute
-- Note: File is read, made executable if needed, then run with bash.
+Execute a script file as a bash command.
+- Args: `path` (str) - path to the script file
 
 ### `read_file`
 Read a file's contents.
@@ -288,12 +295,13 @@ Make a targeted string replacement in a file.
 Search for a pattern in files (uses rg or grep).
 - Args: `pattern` (str), `path` (str, default: ".")
 
-## Rules
-1. Start every complex task with a `think` call to plan.
-2. Execute ONE tool at a time. Wait for results before proceeding.
-3. On failure, try a different approach (up to 3 attempts per step).
-4. NEVER ask for credentials or personal info.
-5. When the task is complete, output:
+## STRICT RULES
+1. **START every task with a `think` call** to plan. Include a numbered TODO list.
+2. **Execute ONE tool at a time.** Wait for results before proceeding.
+3. **NEVER jump straight to <summary>** without using tools first.
+4. On failure, try a different approach (up to 3 attempts per step).
+5. NEVER ask for credentials or personal info.
+6. When ALL steps are done, output:
 
 <summary>
 [v] **Task Complete**
@@ -301,7 +309,7 @@ Search for a pattern in files (uses rg or grep).
 - Key results
 </summary>
 
-6. Be concise. Let your actions speak for themselves."""
+7. Be concise. Let your actions speak for themselves."""
 
 # --- Agent Core --------------------------------------------------------------
 
@@ -324,6 +332,7 @@ class CodeAgent:
         self.results_log: list[ToolResult] = []
         self.running_proc: Optional[subprocess.Popen] = None
         self.width = shutil.get_terminal_size((80, 24)).columns
+        self.mode = "auto"  # auto or manual
         self._init_history()
 
     # -- History Management -------------------------------------------------
@@ -389,10 +398,11 @@ class CodeAgent:
         print(f"  {C.LINE}{'-' * w}{C.RESET}")
 
     def prompt_str(self) -> str:
-        """Build the input prompt with directory and token count."""
+        """Build the input prompt with directory, mode, and token count."""
         p = self.cwd.replace(HOME, "~")
         t = self.estimate_tokens()
-        return f"{C.CYAN}{p}{C.RESET} {C.TOKEN}[{t}t]{C.RESET} {C.GREEN}>{C.RESET} "
+        mode_tag = f"{C.GREEN}A{C.RESET}" if self.mode == "auto" else f"{C.YELLOW}M{C.RESET}"
+        return f"{C.CYAN}{p}{C.RESET} {mode_tag} {C.TOKEN}[{t}t]{C.RESET} {C.GREEN}>{C.RESET} "
 
     def show_thinking(self, thought: str) -> None:
         """Display a thinking block with reasoning."""
@@ -418,7 +428,7 @@ class CodeAgent:
         print(f"\n  {C.BLUE}[tool] {C.BOLD}{name}{C.RESET} {C.GRAY}({desc}){C.RESET}")
 
     def show_tool_result(self, result: ToolResult) -> None:
-        """Display tool execution result with truncated output."""
+        """Display tool execution result with a bordered output box."""
         if result.cancelled:
             status = f"{C.YELLOW}X Cancelled{C.RESET}"
         elif result.success:
@@ -433,15 +443,19 @@ class CodeAgent:
                 print(f"    {C.DIM}(no output){C.RESET}")
             return
 
+        # Show output in a bordered box
+        w = min(self.width - 4, 70)
         lines = output.split("\n")
-        max_lines = 18
+        max_lines = 15
         display = lines[:max_lines]
+        print(f"  {C.LINE}+{'-' * (w - 2)}+{C.RESET}")
         for line in display:
-            if len(line) > self.width - 8:
-                line = line[: self.width - 11] + "..."
-            print(f"    {line}")
+            if len(line) > w - 4:
+                line = line[:w - 7] + "..."
+            print(f"  {C.LINE}|{C.RESET} {line:<{w - 4}} {C.LINE}|{C.RESET}")
         if len(lines) > max_lines:
-            print(f"    {C.GRAY}... and {len(lines) - max_lines} more lines{C.RESET}")
+            print(f"  {C.LINE}|{C.RESET} {C.GRAY}... and {len(lines) - max_lines} more lines{C.RESET}  {C.LINE}|{C.RESET}")
+        print(f"  {C.LINE}+{'-' * (w - 2)}+{C.RESET}")
 
     def show_summary(self, text: str) -> None:
         """Display the final task summary in a bordered box."""
@@ -825,6 +839,26 @@ class CodeAgent:
                 self.show_thinking(args.get("thought", ""))
                 continue
 
+            # Manual mode: ask for confirmation
+            if self.mode == "manual":
+                action_desc = f"{C.BLUE}[tool] {C.BOLD}{name}{C.RESET}"
+                try:
+                    confirm = input(f"\n  {action_desc} - Run this? [Y/n]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    confirm = "n"
+                if confirm not in ("", "y", "yes"):
+                    print(f"  {C.YELLOW}X Skipped{C.RESET}")
+                    # Still feed back to LLM so it knows
+                    self.history.append({"role": "user", "content": f"User skipped tool: {name}"})
+                    ok, next_resp = self.client.chat(self.history)
+                    if ok:
+                        self.history.append({"role": "assistant", "content": next_resp})
+                        self._trim_history()
+                        sub_result = self._process_response(next_resp)
+                        if sub_result is not None:
+                            return sub_result
+                    continue
+
             self.show_tool_call(name, args)
             result = self.dispatch_tool(name, args)
             self.show_tool_result(result)
@@ -863,15 +897,21 @@ class CodeAgent:
         """Handle commands that don't need the LLM. Returns True if handled."""
         lower = inp.lower().strip()
 
-        if lower in ("help", ":h", ":help"):
+        if lower in ("help", ":h", ":help", "/h", "/help"):
             self._show_help()
             return True
-        if lower in ("clear", ":c", ":clear"):
+        if lower in ("clear", ":c", ":clear", "/c", "/clear"):
             os.system("clear" if os.name != "nt" else "cls")
             return True
 
-        # Model switching
-        model_match = re.match(r'^:model\s+(.+)$', inp)
+        # Exit (only via /exit or :exit, not plain "exit")
+        if lower in ("/exit", ":exit"):
+            self._persist()
+            print(f"\n  {C.GREEN}Bye! Session saved.{C.RESET}")
+            sys.exit(0)
+
+        # Model switching (both :model and /model)
+        model_match = re.match(r'^[:/]model\s+(.+)$', inp)
         if model_match:
             new_model = model_match.group(1).strip()
             self.model = new_model
@@ -879,6 +919,16 @@ class CodeAgent:
             memory["model"] = new_model
             self._persist()
             print(f"  {C.GREEN}+ Switched to {C.YELLOW}{new_model}{C.RESET}")
+            return True
+
+        # Mode switching
+        if lower in (":auto", "/auto"):
+            self.mode = "auto"
+            print(f"  {C.GREEN}+ Mode: Auto{C.RESET} {C.GRAY}(auto-execute tools){C.RESET}")
+            return True
+        if lower in (":manual", "/manual"):
+            self.mode = "manual"
+            print(f"  {C.YELLOW}+ Mode: Manual{C.RESET} {C.GRAY}(confirm each tool){C.RESET}")
             return True
 
         # Cd is handled as a direct command for speed
@@ -910,14 +960,20 @@ class CodeAgent:
         print(f"    Tell me what you want done - I'll plan and execute")
         print(f"\n  {C.GREEN}cd <path>{C.RESET}")
         print(f"    Change directory (with fuzzy matching)")
-        print(f"\n  {C.GREEN}:model <name>{C.RESET}")
-        print(f"    Switch Ollama model (e.g. :model deepseek-coder:1.3b)")
-        print(f"\n  {C.GREEN}:help{C.RESET}    Show this help")
-        print(f"  {C.GREEN}:clear{C.RESET}   Clear screen")
-        print(f"  {C.GREEN}exit{C.RESET}     Save and quit")
+        print(f"  {C.GREEN}go to <path>{C.RESET}")
+        print(f"    Natural language directory change")
+        print(f"\n  {C.GREEN}:model / /model <name>{C.RESET}")
+        print(f"    Switch Ollama model")
+        print(f"  {C.GREEN}:auto / /auto{C.RESET}")
+        print(f"    Auto mode - execute tools without asking")
+        print(f"  {C.GREEN}:manual / /manual{C.RESET}")
+        print(f"    Manual mode - confirm each tool before running")
+        print(f"\n  {C.GREEN}:help / /help{C.RESET}   Show this help")
+        print(f"  {C.GREEN}:clear / /clear{C.RESET}  Clear screen")
+        print(f"  {C.GREEN}:exit / /exit{C.RESET}   Save and quit")
         print(f"\n  {C.GRAY}Tips:{C.RESET}")
         print(f"  {C.GRAY}* Be specific about what you want{C.RESET}")
-        print(f"  {C.GRAY}* For multi-step tasks, I'll create a plan{C.RESET}")
+        print(f"  {C.GRAY}* Use :manual to review each step{C.RESET}")
         print(f"  {C.GRAY}* I'll summarize results when done{C.RESET}")
         print()
 
@@ -938,12 +994,7 @@ class CodeAgent:
             if not inp:
                 continue
 
-            if inp.lower() == "exit":
-                self._persist()
-                print(f"\n  {C.GREEN}Bye! Session saved.{C.RESET}")
-                break
-
-            # Handle direct commands
+            # Handle direct commands (including /exit)
             if self.handle_direct(inp):
                 continue
 
