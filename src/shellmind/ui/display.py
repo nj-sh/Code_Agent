@@ -4,6 +4,8 @@ Terminal display helpers for ShellMind.
 Provides formatted output for headers, thinking blocks, tool calls,
 results, summaries, progress tracking, and status messages.
 All methods use the active Theme for consistent coloring.
+
+Supports verbosity levels: quiet (minimal), normal (default), verbose (detailed).
 """
 
 import os
@@ -14,29 +16,46 @@ from shellmind.config import get_terminal_width
 from shellmind.ui.theme import get_active, Theme
 
 
+# Verbosity levels
+VERBOSITY_QUIET = 0
+VERBOSITY_NORMAL = 1
+VERBOSITY_VERBOSE = 2
+VERBOSITY_DEBUG = 3
+
+_verbosity = VERBOSITY_NORMAL
+
+
+def set_verbosity(level: int) -> None:
+    """Set the global verbosity level."""
+    global _verbosity  # noqa: PLW0603
+    _verbosity = level
+
+
+def get_verbosity() -> int:
+    """Get the current verbosity level."""
+    return _verbosity
+
+
 class ProgressTracker:
     """Tracks and displays a todo-checklist during task execution."""
 
     def __init__(self):
-        self._steps: list[dict] = []  # {label, status}
+        self._steps: list[dict] = []
         self._current_step = 0
         self._total_steps = 0
 
     def reset(self) -> None:
-        """Clear all tracked steps."""
         self._steps = []
         self._current_step = 0
         self._total_steps = 0
 
     def set_plan(self, steps: list[str]) -> None:
-        """Set the plan from a list of step descriptions."""
         self.reset()
         for step in steps:
             self._steps.append({"label": step, "status": "todo"})
         self._total_steps = len(steps)
 
     def start_step(self, index: int = 0, label: str = "") -> None:
-        """Mark a step as in-progress."""
         if label and index < len(self._steps):
             self._steps[index]["label"] = label
         if index < len(self._steps):
@@ -44,7 +63,6 @@ class ProgressTracker:
             self._current_step = index
 
     def complete_step(self, index: int, success: bool = True) -> None:
-        """Mark a step as done or failed."""
         if index < len(self._steps):
             self._steps[index]["status"] = "done" if success else "failed"
 
@@ -53,20 +71,17 @@ class ProgressTracker:
         return self._total_steps > 0
 
     def render(self, display: "Display") -> None:
-        """Render the current progress to the terminal."""
-        if not self._steps:
+        if not self._steps or get_verbosity() < VERBOSITY_NORMAL:
             return
 
         theme = get_active()
         w = display._wrap()
         print()
 
-        # Header with step counter
         header = f" Progress [{self._current_step + 1}/{self._total_steps}] " if self._total_steps > 0 else " Progress "
         print(f"{theme.accent}├{'─' * (w - 4)}┤{theme.reset}")
         print(f"{theme.accent}│{theme.reset}{theme.bold}{header:<{w - 4}}{theme.reset}{theme.accent}│{theme.reset}")
 
-        # Each step
         for i, step in enumerate(self._steps):
             label = step["label"]
             status = step["status"]
@@ -79,7 +94,7 @@ class ProgressTracker:
             elif status == "failed":
                 icon = f"{theme.error}[✗]{theme.reset}"
                 label_text = f"{theme.error}{label}{theme.reset}"
-            else:  # todo
+            else:
                 icon = f"{theme.muted}[ ]{theme.reset}"
                 label_text = f"{theme.muted}{label}{theme.reset}"
 
@@ -99,34 +114,27 @@ class Display:
         self.tracker = ProgressTracker()
 
     def refresh_width(self) -> None:
-        """Re-detect terminal width."""
         self.width = get_terminal_width()
 
     def _wrap(self, width: int | None = None) -> int:
-        """Get effective wrap width."""
         w = width or self.width
         return min(w, 72)
 
     def reset_progress(self) -> None:
-        """Reset the progress tracker before a new task."""
         self.tracker.reset()
 
     def set_plan(self, steps: list[str]) -> None:
-        """Set the execution plan for the current task."""
         self.tracker.set_plan(steps)
 
     def show_progress(self) -> None:
-        """Render the current progress checklist."""
         if self.tracker.is_active:
             self.tracker.render(self)
 
     def step_start(self, index: int, label: str = "") -> None:
-        """Mark a step as in-progress and render."""
         self.tracker.start_step(index, label)
         self.show_progress()
 
     def step_done(self, index: int, success: bool = True) -> None:
-        """Mark a step as complete and render."""
         self.tracker.complete_step(index, success)
         self.show_progress()
 
@@ -134,7 +142,6 @@ class Display:
 
     def header(self, model: str, cwd: str, memory_name: str,
                last_summary: str = "") -> None:
-        """Render the startup banner."""
         theme = get_active()
         w = self._wrap()
         print(f"\n{theme.bold}{theme.accent}+{'=' * (w - 2)}+{theme.reset}")
@@ -151,13 +158,15 @@ class Display:
             last = last_summary.split("\n")[0][:60]
             print(f"  {theme.muted}Last:   {theme.dim}{last}{theme.reset}")
         theme_t = get_active().name
+        verbosity_names = {0: "quiet", 1: "normal", 2: "verbose", 3: "debug"}
         print(f"  {theme.warning}[i]{theme.reset} {theme.dim}Theme: {theme_t} | :help for commands{theme.reset}")
         print(f"  {theme.line}{'-' * w}{theme.reset}")
 
     # ─── Thinking Block ───────────────────────────────────────────────
 
     def thinking(self, thought: str) -> None:
-        """Display a thinking block in a distinctive box."""
+        if get_verbosity() < VERBOSITY_NORMAL:
+            return  # Skip thinking blocks in quiet mode
         theme = get_active()
         w = self._wrap()
         print(f"\n{theme.accent}+{'~' * (w - 2)}+{theme.reset}")
@@ -173,7 +182,8 @@ class Display:
     # ─── Tool Call ────────────────────────────────────────────────────
 
     def tool_call(self, name: str, args: dict) -> None:
-        """Display a tool invocation."""
+        if get_verbosity() < VERBOSITY_NORMAL:
+            return  # Skip tool call display in quiet mode
         theme = get_active()
         parts = []
         for k, v in args.items():
@@ -184,14 +194,12 @@ class Display:
         desc = ", ".join(parts[:2])
         if len(parts) > 2:
             desc += " ..."
-
         print(f"\n{theme.accent}>>{theme.reset} {theme.bold}{name}{theme.reset} {theme.muted}({desc}){theme.reset}")
 
     # ─── Tool Result ──────────────────────────────────────────────────
 
     def tool_result(self, success: bool, output: str, duration: float,
                     cancelled: bool = False) -> None:
-        """Display a tool execution result."""
         theme = get_active()
         if cancelled:
             tag = f"{theme.warning}!! Cancelled{theme.reset}"
@@ -201,6 +209,9 @@ class Display:
             tag = f"{theme.error}>> Failed{theme.reset}"
         print(f"  {tag} {theme.muted}({duration:.2f}s){theme.reset}")
 
+        if get_verbosity() < VERBOSITY_NORMAL:
+            return  # Skip output in quiet mode
+
         output = output.strip()
         if not output:
             if not success and not cancelled:
@@ -208,8 +219,8 @@ class Display:
             return
 
         w = self._wrap() - 4
+        max_lines = 30 if get_verbosity() >= VERBOSITY_VERBOSE else 15
         lines = output.split("\n")
-        max_lines = 15
         display_lines = lines[:max_lines]
         print(f"  {theme.line}+{'.' * (w - 2)}+{theme.reset}")
         for line in display_lines:
@@ -224,7 +235,11 @@ class Display:
     # ─── Summary ──────────────────────────────────────────────────────
 
     def summary(self, text: str) -> None:
-        """Display the final task summary in a bordered box."""
+        if get_verbosity() < VERBOSITY_NORMAL:
+            # Quiet mode: just print the first line
+            first = text.strip().split("\n")[0][:80]
+            print(f"  {get_active().success}✓ {first}{get_active().reset}")
+            return
         theme = get_active()
         w = self._wrap()
         print(f"\n{theme.success}+{'-' * (w - 2)}+{theme.reset}")
@@ -233,33 +248,38 @@ class Display:
                 print(f"{theme.success}| {wl:<{w - 4}} |{theme.reset}")
         print(f"{theme.success}+{'-' * (w - 2)}+{theme.reset}")
 
+    # ─── Streaming Output ─────────────────────────────────────────────
+
+    def stream_line(self, line: str) -> None:
+        """Display a line of streaming command output."""
+        if get_verbosity() >= VERBOSITY_VERBOSE:
+            theme = get_active()
+            print(f"  {theme.muted}|{theme.reset} {line}")
+
     # ─── Status / Info / Error ────────────────────────────────────────
 
     @staticmethod
     def error(msg: str) -> None:
-        """Display an error message."""
         theme = get_active()
         print(f"  {theme.error}x {msg}{theme.reset}")
 
     @staticmethod
     def info(msg: str) -> None:
-        """Display an info message."""
+        if get_verbosity() < VERBOSITY_NORMAL:
+            return  # Skip info in quiet mode
         theme = get_active()
         print(f"  {theme.muted}{msg}{theme.reset}")
 
     @staticmethod
     def warning(msg: str) -> None:
-        """Display a warning message."""
         theme = get_active()
         print(f"  {theme.warning}! {msg}{theme.reset}")
 
     @staticmethod
     def success(msg: str) -> None:
-        """Display a success message."""
         theme = get_active()
         print(f"  {theme.success}+ {msg}{theme.reset}")
 
     @staticmethod
     def raw(text: str) -> None:
-        """Print raw text (no theme colors)."""
         print(text)

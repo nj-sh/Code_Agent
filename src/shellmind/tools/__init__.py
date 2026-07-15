@@ -6,9 +6,11 @@ from shellmind.tools.git import GitTools
 from shellmind.tools.fileops import FileOpsTools
 from shellmind.tools.pkg_manager import PkgTools
 from shellmind.tools.interactive import InteractiveTools
+from shellmind.tools.undo import UndoTools
 
 __all__ = [
     "ToolResult", "BaseTool", "ToolRegistry",
     "ShellTools", "CdTool", "FileSystemTools",
     "GitTools", "FileOpsTools", "PkgTools", "InteractiveTools",
+    "UndoTools",
 ]

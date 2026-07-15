@@ -2,16 +2,16 @@
 Shell command execution tools for ShellMind.
 
 Provides execute_command and execute_file with full cross-platform support,
-process management, and timeout handling.
+process management, and timeout handling. Supports live streaming output.
 """
 
 import os
 import re
 import time
-from typing import Any
+from typing import Any, Callable, Optional
 
 from shellmind.tools.base import BaseTool, ToolResult
-from shellmind.platform import run_command, is_windows
+from shellmind.platform import run_command, run_command_streaming, is_windows
 
 
 class CdTool(BaseTool):
@@ -32,13 +32,11 @@ class CdTool(BaseTool):
         return self._change_dir(path)
 
     def _change_dir(self, path: str) -> ToolResult:
-        """Change directory. Returns ToolResult with new path information."""
         t0 = time.time()
         expanded = os.path.expanduser(path)
         test = expanded if os.path.isabs(expanded) else os.path.join(os.getcwd(), expanded)
         test = os.path.normpath(test)
 
-        # Exact match
         if os.path.isdir(test):
             os.chdir(test)
             new_cwd = os.getcwd()
@@ -51,7 +49,6 @@ class CdTool(BaseTool):
                 {"command": f"cd {path}"},
             )
 
-        # Fuzzy match
         parent = os.path.dirname(test) or "."
         target = os.path.basename(test)
         try:
@@ -73,7 +70,6 @@ class CdTool(BaseTool):
         except (PermissionError, FileNotFoundError):
             pass
 
-        # Show available dirs
         try:
             dirs = [d for d in os.listdir(os.getcwd()) if os.path.isdir(os.path.join(os.getcwd(), d))]
             hint = f"\nAvailable: {', '.join(dirs[:10])}" if dirs else ""
@@ -90,7 +86,11 @@ class CdTool(BaseTool):
 
 
 class ExecuteCommandTool(BaseTool):
-    """Run a bash/shell command and capture output."""
+    """Run a bash/shell command with optional live streaming output."""
+
+    def __init__(self, stream_callback: Optional[Callable[[str], None]] = None):
+        super().__init__()
+        self._stream_callback = stream_callback
 
     @property
     def name(self) -> str:
@@ -108,12 +108,21 @@ class ExecuteCommandTool(BaseTool):
         t0 = time.time()
         cwd = kwargs.get("cwd")
         timeout = kwargs.get("timeout", 120)
+        stream = kwargs.get("stream", self._stream_callback is not None)
 
-        ec, output, timed_out = run_command(
-            command=command,
-            cwd=cwd,
-            timeout=timeout,
-        )
+        if stream and self._stream_callback:
+            ec, output, timed_out = run_command_streaming(
+                command=command,
+                cwd=cwd,
+                timeout=timeout,
+                on_line=self._stream_callback,
+            )
+        else:
+            ec, output, timed_out = run_command(
+                command=command,
+                cwd=cwd,
+                timeout=timeout,
+            )
 
         return ToolResult(
             success=(ec == 0 and not timed_out),
@@ -168,10 +177,14 @@ class ExecuteFileTool(BaseTool):
 class ShellTools:
     """Convenience access to shell tools."""
 
-    def __init__(self):
+    def __init__(self, stream_callback: Optional[Callable[[str], None]] = None):
         self.cd = CdTool()
-        self.command = ExecuteCommandTool()
+        self.command = ExecuteCommandTool(stream_callback=stream_callback)
         self.file = ExecuteFileTool()
+
+    def set_stream_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Update the streaming callback on the command tool."""
+        self.command.set_stream_callback(callback)
 
     def get_all(self) -> list[BaseTool]:
         return [self.cd, self.command, self.file]

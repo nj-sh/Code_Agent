@@ -2,15 +2,16 @@
 File system tools for ShellMind.
 
 Provides read, write, edit, and search operations on files.
+Write and edit operations create undo backups automatically.
 """
 
 import os
-import re
 import subprocess
 import time
 from typing import Any
 
 from shellmind.tools.base import BaseTool, ToolResult
+from shellmind.tools.undo import backup_before_write
 from shellmind.platform import is_windows
 
 
@@ -42,7 +43,7 @@ class ReadFileTool(BaseTool):
 
 
 class WriteFileTool(BaseTool):
-    """Create or overwrite a file."""
+    """Create or overwrite a file (with undo backup)."""
 
     @property
     def name(self) -> str:
@@ -61,6 +62,9 @@ class WriteFileTool(BaseTool):
         t0 = time.time()
         full = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
 
+        # Create undo backup before overwriting
+        backup_before_write(full)
+
         try:
             os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
             with open(full, "w", encoding="utf-8") as f:
@@ -77,7 +81,7 @@ class WriteFileTool(BaseTool):
 
 
 class EditFileTool(BaseTool):
-    """Make targeted string replacements in a file."""
+    """Make targeted string replacements in a file (with undo backup)."""
 
     @property
     def name(self) -> str:
@@ -85,7 +89,7 @@ class EditFileTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Make a targeted string replacement in a file."
+        return "Replace text in a file. Args: `path`, `old_string`, `new_string`"
 
     def execute(self, **kwargs: Any) -> ToolResult:
         path = kwargs.get("path", "")
@@ -111,6 +115,9 @@ class EditFileTool(BaseTool):
                     self.name,
                     kwargs,
                 )
+
+            # Create undo backup before editing
+            backup_before_write(full)
 
             new_content = content.replace(old_string, new_string, 1)
             with open(full, "w", encoding="utf-8") as f:
@@ -156,11 +163,9 @@ class SearchCodeTool(BaseTool):
         if result is not None:
             return result
 
-        # Fallback to grep or findstr
         return self._try_fallback(pattern, full_path, t0)
 
     def _try_rg(self, pattern: str, path: str) -> ToolResult | None:
-        """Try using ripgrep (rg)."""
         try:
             result = subprocess.run(
                 ["rg", "-n", pattern, path],
@@ -173,7 +178,6 @@ class SearchCodeTool(BaseTool):
             return None
 
     def _try_fallback(self, pattern: str, path: str, t0: float) -> ToolResult:
-        """Fallback to grep (Unix) or findstr (Windows)."""
         try:
             if is_windows():
                 result = subprocess.run(

@@ -21,6 +21,7 @@ from shellmind.config import (
     get_terminal_width,
     HOME,
 )
+from shellmind.config_parser import load_config, save_config, get_config_value
 from shellmind.memory import Memory
 from shellmind.ui.theme import get_active, set_active, available_themes
 from shellmind.ui.display import Display
@@ -34,7 +35,12 @@ from shellmind.tools.git import GitTools
 from shellmind.tools.fileops import FileOpsTools
 from shellmind.tools.pkg_manager import PkgTools
 from shellmind.tools.interactive import InteractiveTools
+from shellmind.tools.undo import UndoTools
 from shellmind.platform import run_command
+
+
+# Token limit estimate — most models support at least 8K context
+MAX_CONTEXT_TOKENS = 7000  # Leave headroom below actual model limit
 
 
 class CodeAgent:
@@ -58,30 +64,43 @@ class CodeAgent:
     ):
         self.cwd = os.getcwd()
         self.memory = memory or Memory()
-        self.model = model or self.memory.model
+
+        # Load config from file (user preferences)
+        self.config = load_config()
+        config_model = self.config.get("model", DEFAULT_MODEL)
+        self.model = model or self.memory.model or config_model
+
         self.providers = ProviderRegistry()
         if self.model:
             self.providers.active_model = self.model
+
         self.display = Display()
         self.tools = ToolRegistry()
         self._setup_tools()
+
         self.history: list[dict] = []
         self.results_log: list[ToolResult] = []
-        self.last_input: str = ""  # For :retry command
-        self.mode = mode  # auto or manual
+        self.last_input: str = ""
+        self.mode = mode or self.config.get("mode", "auto")
         self.clear_screen = clear_screen
         self.cancelled = False
         self._init_history()
 
+        # Apply config theme
+        config_theme = self.config.get("theme", "dark")
+        if config_theme in available_themes():
+            set_active(config_theme)
+
     def _setup_tools(self) -> None:
         """Register all available tools in the registry."""
         for tool_set in [
-            ShellTools().get_all(),
+            ShellTools(self.display.stream_line).get_all(),
             FileSystemTools().get_all(),
             GitTools().get_all(),
             FileOpsTools().get_all(),
             PkgTools().get_all(),
             InteractiveTools().get_all(),
+            UndoTools().get_all(),
         ]:
             for tool in tool_set:
                 self.tools.register(tool)
@@ -185,6 +204,19 @@ class CodeAgent:
             len(m.get("content", "").split()) for m in self.history
         )
         return int(total / 0.75)
+
+    def _trim_by_tokens(self) -> None:
+        """Token-aware history trimming. Removes oldest messages when
+        estimated token count exceeds MAX_CONTEXT_TOKENS.
+        Keeps the system prompt and the most recent messages."""
+        if self.estimate_tokens() <= MAX_CONTEXT_TOKENS:
+            return
+        # Remove oldest user/assistant pairs until under limit
+        while len(self.history) > 3 and self.estimate_tokens() > MAX_CONTEXT_TOKENS:
+            # Remove the second-oldest message (index 1, after system prompt)
+            self.history.pop(1)
+            if len(self.history) > 2:
+                self.history.pop(1)  # Remove the corresponding pair
 
     # ─── Terminal UI ──────────────────────────────────────────────────
 
@@ -299,6 +331,7 @@ class CodeAgent:
 
         self.history.append({"role": "assistant", "content": result.content})
         self._trim_history()
+        self._trim_by_tokens()
 
         # Check for summary first
         summary = self.extract_summary(result.content)
@@ -412,6 +445,7 @@ class CodeAgent:
 
             self.history.append({"role": "assistant", "content": next_result.content})
             self._trim_history()
+            self._trim_by_tokens()
 
             # Recursively process
             sub_result = self._process_response(next_result.content)
@@ -519,6 +553,37 @@ class CodeAgent:
             self.display.tool_result(result.success, result.output, result.duration)
             return True
 
+        # Cancel — abort the current running task
+        if lower in (":cancel", "/cancel"):
+            if self.cancelled:
+                print(f"  {get_active().muted}Already cancelled.{get_active().reset}")
+            else:
+                self.cancelled = True
+                print(f"  {get_active().warning}Cancelling current task...{get_active().reset}")
+            return True
+
+        # Verbosity modes
+        if lower in (":quiet", "/quiet"):
+            from shellmind.ui.display import set_verbosity, VERBOSITY_QUIET
+            set_verbosity(VERBOSITY_QUIET)
+            print(f"  {get_active().muted}Mode: Quiet (minimal output){get_active().reset}")
+            return True
+        if lower in (":verbose", "/verbose"):
+            from shellmind.ui.display import set_verbosity, VERBOSITY_VERBOSE
+            set_verbosity(VERBOSITY_VERBOSE)
+            print(f"  {get_active().warning}Mode: Verbose (detailed output){get_active().reset}")
+            return True
+        if lower in (":debug", "/debug"):
+            from shellmind.ui.display import set_verbosity, VERBOSITY_DEBUG
+            set_verbosity(VERBOSITY_DEBUG)
+            print(f"  {get_active().warning}Mode: Debug (streaming output){get_active().reset}")
+            return True
+        if lower in (":normal", "/normal"):
+            from shellmind.ui.display import set_verbosity, VERBOSITY_NORMAL
+            set_verbosity(VERBOSITY_NORMAL)
+            print(f"  {get_active().success}Mode: Normal{get_active().reset}")
+            return True
+
         # Version
         if lower in ("--version", "-v", ":version", "/version"):
             print(f"  ShellMind v{__version__}")
@@ -547,8 +612,15 @@ class CodeAgent:
         print(f"    Toggle auto/manual tool execution mode")
         print(f"  {theme.success}:retry{theme.reset}  /  {theme.success}:r")
         print(f"    Re-run the last task")
+        print(f"  {theme.success}:cancel{theme.reset}")
+        print(f"    Cancel the current running task")
         print(f"  {theme.success}:status{theme.reset}")
         print(f"    Show current session state")
+        print(f"\n  {theme.success}Output{theme.reset}")
+        print(f"  {theme.success}:quiet{theme.reset}    Minimal output (progress only)")
+        print(f"  {theme.success}:verbose{theme.reset}  Detailed output")
+        print(f"  {theme.success}:debug{theme.reset}    Debug output (with streaming)")
+        print(f"  {theme.success}:normal{theme.reset}   Standard output (default)")
         print(f"\n  {theme.success}:help{theme.reset}      Show this help")
         print(f"  {theme.success}:clear{theme.reset}     Clear screen")
         print(f"  {theme.success}:exit{theme.reset}      Save and quit")
@@ -565,14 +637,18 @@ class CodeAgent:
         theme = get_active()
         w = min(get_terminal_width(), 56)
         print(f"\n{theme.accent}── Session Status ──{theme.reset}")
+        from shellmind.ui.display import get_verbosity
+        verbosity_names = {0: "quiet", 1: "normal", 2: "verbose", 3: "debug"}
         print(f"  {theme.muted}Provider:{theme.reset}{theme.warning} {self.providers.active_name}{theme.reset}")
         print(f"  {theme.muted}Model:{theme.reset}    {theme.warning}{self.model}{theme.reset}")
         print(f"  {theme.muted}Mode:{theme.reset}     {theme.success if self.mode == 'auto' else theme.warning}{self.mode}{theme.reset}")
         print(f"  {theme.muted}Theme:{theme.reset}    {theme.accent}{get_active().name}{theme.reset}")
+        print(f"  {theme.muted}Output:{theme.reset}   {theme.token}{verbosity_names.get(get_verbosity(), 'normal')}{theme.reset}")
         print(f"  {theme.muted}CWD:{theme.reset}     {theme.accent}{self.cwd.replace(HOME, '~')}{theme.reset}")
         print(f"  {theme.muted}Memory:{theme.reset}  {theme.dim}{self.memory.path}{theme.reset}")
         tokens = self.estimate_tokens()
-        print(f"  {theme.muted}Tokens:{theme.reset}  {theme.token}{tokens}{theme.reset}")
+        token_pct = int(tokens / MAX_CONTEXT_TOKENS * 100) if MAX_CONTEXT_TOKENS else 0
+        print(f"  {theme.muted}Tokens:{theme.reset}  {theme.token}{tokens}{theme.reset} ({token_pct}% of {MAX_CONTEXT_TOKENS})")
         tools_avail = self.tools.list_tools()
         print(f"  {theme.muted}Tools:{theme.reset}   {len(tools_avail)} registered: {', '.join(tools_avail)}")
         if self.last_input:
