@@ -64,6 +64,27 @@ python3 Agent.py
 ```
 
 ### Example Session
+### Command-line options
+
+Run a task once (useful in scripts or editor integrations):
+
+```bash
+python3 Agent.py -C ~/project -p "find all TODO comments"
+python3 Agent.py "list the files in this directory"
+```
+
+Useful options:
+
+| Option | Purpose |
+|---|---|
+| `-p`, `--prompt TEXT` | Run one task and exit |
+| `-C`, `--cwd DIR` | Start in a project directory |
+| `-m`, `--model NAME` | Use a model for the current session |
+| `--manual` | Ask before every tool call |
+| `--no-clear` | Preserve existing terminal output |
+| `--help`, `--version` | Show CLI help or version |
+
+
 
 ```
 ~/projects [1.2k] ❯ find all python files and count lines

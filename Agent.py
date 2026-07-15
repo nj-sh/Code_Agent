@@ -26,6 +26,7 @@ Recommended lightweight models:
   * qwen2.5-coder:7b     - smarter but heavier, ~4GB VRAM
 """
 
+import argparse
 import os
 import json
 import re
@@ -330,15 +331,17 @@ class CodeAgent:
         r'<summary>(.*?)</summary>', re.DOTALL
     )
 
-    def __init__(self):
+    def __init__(self, model: Optional[str] = None, mode: str = "auto",
+                 clear_screen: bool = True):
         self.cwd = os.getcwd()
-        self.model = memory.get("model", DEFAULT_MODEL)
+        self.model = model or memory.get("model", DEFAULT_MODEL)
         self.client = OllamaClient(OLLAMA_URL, self.model)
         self.history: list[dict] = []
         self.results_log: list[ToolResult] = []
         self.running_proc: Optional[subprocess.Popen] = None
         self.width = shutil.get_terminal_size((80, 24)).columns
-        self.mode = "auto"  # auto or manual
+        self.mode = mode  # auto or manual
+        self.clear_screen = clear_screen
         self._init_history()
 
     # -- History Management -------------------------------------------------
@@ -990,17 +993,45 @@ class CodeAgent:
 
     # -- Main Run Loop -----------------------------------------------------
 
+    def run_once(self, task: str) -> bool:
+        """Run one task without opening the interactive prompt."""
+        self.results_log = []
+        self.show_info("Processing...")
+        summary = self.execute_task(task)
+        print()
+
+        if summary:
+            self.show_summary(summary)
+            memory["last_task"] = task[:100]
+            memory["last_summary"] = summary
+        elif self.results_log:
+            successes = sum(1 for result in self.results_log if result.success)
+            failures = len(self.results_log) - successes
+            status = f"{C.GREEN}+ {successes} steps succeeded{C.RESET}"
+            if failures:
+                status += f", {C.RED}{failures} failed{C.RESET}"
+            print(f"  {C.GRAY}--- complete ---{C.RESET}")
+            print(f"  {status}")
+
+        self._persist()
+        return summary is not None or bool(self.results_log)
+
     def run(self) -> None:
         """Main REPL loop."""
-        os.system("clear" if os.name != "nt" else "cls")
+        if self.clear_screen:
+            os.system("clear" if os.name != "nt" else "cls")
         self.print_header()
 
         while True:
             try:
                 inp = input(self.prompt_str()).strip()
-            except (KeyboardInterrupt, EOFError):
+            except KeyboardInterrupt:
                 print()
                 continue
+            except EOFError:
+                self._persist()
+                print(f"\n  {C.GREEN}Bye! Session saved.{C.RESET}")
+                return
 
             if not inp:
                 continue
@@ -1047,5 +1078,59 @@ class CodeAgent:
             self._persist()
 
 
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    """Parse command-line options without requiring any third-party package."""
+    parser = argparse.ArgumentParser(
+        description="A local Ollama-powered coding agent.",
+        epilog=("Examples:\n"
+                "  python3 Agent.py\n"
+                "  python3 Agent.py --model qwen2.5-coder:7b\n"
+                "  python3 Agent.py --cwd ~/project -p 'find TODO comments'\n"
+                "  python3 Agent.py 'list the files in this directory'"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("task", nargs="*", help="Optional one-shot task to run.")
+    parser.add_argument("-p", "--prompt", metavar="TEXT",
+                        help="Run TEXT once, then exit.")
+    parser.add_argument("-m", "--model", metavar="NAME",
+                        help="Ollama model to use for this session.")
+    parser.add_argument("-C", "--cwd", metavar="DIR",
+                        help="Start in DIR instead of the current directory.")
+    parser.add_argument("--manual", action="store_true",
+                        help="Ask before running each tool call.")
+    parser.add_argument("--no-clear", action="store_true",
+                        help="Do not clear the terminal before the REPL starts.")
+    parser.add_argument("--version", action="version",
+                        version=f"Code Agent {VERSION}")
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+    if args.prompt and args.task:
+        print("error: use either a positional task or --prompt, not both.",
+              file=sys.stderr)
+        return 2
+
+    if args.cwd:
+        target = os.path.abspath(os.path.expanduser(args.cwd))
+        if not os.path.isdir(target):
+            print(f"error: directory not found: {args.cwd}", file=sys.stderr)
+            return 2
+        os.chdir(target)
+
+    task = args.prompt or " ".join(args.task).strip()
+    agent = CodeAgent(
+        model=args.model,
+        mode="manual" if args.manual else "auto",
+        clear_screen=not args.no_clear,
+    )
+    if task:
+        return 0 if agent.run_once(task) else 1
+
+    agent.run()
+    return 0
+
+
 if __name__ == "__main__":
-    CodeAgent().run()
+    sys.exit(main())
