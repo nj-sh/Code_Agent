@@ -46,6 +46,8 @@ MAX_CONTEXT_TOKENS = 7000  # Leave headroom below actual model limit
 class CodeAgent:
     """Main agent class - manages LLM conversation, tool execution, and UI."""
 
+    # Tool call regex — matches <tool_call> tags with JSON content
+    # Handles multi-line and single-line formats
     TOOL_CALL_RE = re.compile(
         r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL
     )
@@ -113,21 +115,17 @@ class CodeAgent:
         return (
             "You are ShellMind - a cross-platform terminal coding assistant.\n"
             "\n"
-            "## CRITICAL: Use tools to do work. NEVER just say you did something.\n"
+            "## CRITICAL RULES\n"
+            "1. USE TOOLS to do work. NEVER just describe what you would do.\n"
+            "2. START every task with a `think` tool call to plan your steps.\n"
+            "3. Execute ONE tool at a time, wait for its result, then continue.\n"
+            "4. ALWAYS show the output/data to the user before summarizing.\n"
+            "5. When done, wrap a <summary>...</summary> around your final message.\n"
+            "6. NEVER ask for credentials or personal info.\n"
             "\n"
-            "## OUTPUT RULE: Show content BEFORE summarizing.\n"
-            "\n"
-            "## Workflow\n"
-            "1. **think** - Plan your approach, outlining specific steps\n"
-            "2. **Execute ONE tool** - Call the tool, wait for result\n"
-            "3. **SHOW the result** - Write the data clearly to the user\n"
-            "4. **Repeat** - Continue with next tool if needed\n"
-            "5. **Summarize** - Only output <summary> AFTER showing data\n"
-            "\n"
-            "## Tool format: Output tool calls as JSON inside <tool_call> tags:\n"
-            "<tool_call>\n"
-            '{"name": "tool_name", "args": { ... }}\n'
-            "</tool_call>\n"
+            "## Tool Format (EXACTLY this, one per <tool_call> block)\n"
+            "ALWAYS use this format - put the ENTIRE JSON on ONE LINE:\n"
+            '<tool_call>{"name": "tool_name", "args": {"arg": "value"}}</tool_call>\n'
             "\n"
             "## Available Tools\n"
             "- **think**: Plan your approach. Args: `thought`\n"
@@ -148,16 +146,15 @@ class CodeAgent:
             "- **pkg_install**: Install packages. Args: `packages`, `manager`\n"
             "- **shell_send**: Send command to persistent shell. Args: `command`\n"
             "- **shell_close**: Close persistent shell session\n"
+            "- **cd**: Change directory with fuzzy matching. Args: `path`\n"
             "\n"
-            "## STRICT RULES\n"
-            "1. START every task with a `think` call that lists your plan as bullet points\n"
-            "2. Execute ONE tool at a time - Wait for results before proceeding\n"
-            "3. SHOW the output to the user first - Write data clearly\n"
-            "4. Summarize LAST - <summary> must come AFTER showing data\n"
-            "5. On failure, try a different approach (up to 3 times)\n"
-            "6. NEVER ask for credentials or personal info\n"
-            "7. When ALL steps are done, output a summary\n"
-            f"8. For directory changes, use: cd with path argument\n"
+            "## Example session\n"
+            "User: list the files in /tmp\n"
+            'Assistant: <tool_call>{"name": "think", "args": {"thought": "User wants to list /tmp. I will run ls and show the result."}}</tool_call>\n'
+            "User: Result of think: ...\n"
+            'Assistant: <tool_call>{"name": "execute_command", "args": {"command": "ls -la /tmp"}}</tool_call>\n'
+            "User: Result of execute_command: ...\n"
+            "Assistant: Here are the files:\n...\n<summary>Listed /tmp directory with {count} files.</summary>\n"
         )
 
     def _init_history(self) -> None:
@@ -270,13 +267,59 @@ class CodeAgent:
     # ─── Tool Call Extraction ─────────────────────────────────────────
 
     def extract_tool_calls(self, text: str) -> list[dict]:
-        """Extract all tool call JSON objects from AI response."""
+        """Extract all tool call JSON objects from AI response.
+
+        Supports various formats:
+        - <tool_call>{...}</tool_call>
+        - <tool_call>\n{...}\n</tool_call>
+        - Also tries to find bare JSON if tags are missing
+        """
         calls = []
         for match in self.TOOL_CALL_RE.finditer(text):
+            json_str = match.group(1).strip()
             try:
-                obj = json.loads(match.group(1))
+                obj = json.loads(json_str)
                 if isinstance(obj, dict) and "name" in obj:
                     calls.append(obj)
+            except json.JSONDecodeError:
+                # Try to find JSON even without proper tags
+                continue
+
+        # If no tagged calls found, try to find bare JSON tool objects
+        if not calls:
+            calls = self._extract_bare_tool_calls(text)
+
+        return calls
+
+    def _extract_bare_tool_calls(self, text: str) -> list[dict]:
+        """Try to extract tool call JSON from bare objects in the text.
+
+        Uses a bracket-balancing approach to capture full args JSON
+        even when it contains nested objects.
+        """
+        calls = []
+        # Find candidate regions: {"name": "...", "args": {
+        pattern = r'\{"name":\s*"(\w+)"\s*,\s*"args"\s*:\s*'
+        for match in re.finditer(pattern, text, re.DOTALL):
+            name = match.group(1)
+            rest = text[match.end():]
+            # Balance braces to find the full args JSON and the closing }
+            depth = 0
+            end_idx = -1
+            for i, ch in enumerate(rest):
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end_idx = i + 1
+                        break
+            if end_idx <= 0:
+                continue
+            args_str = rest[:end_idx]
+            try:
+                args = json.loads(args_str)
+                calls.append({"name": name, "args": args})
             except json.JSONDecodeError:
                 continue
         return calls
@@ -316,6 +359,7 @@ class CodeAgent:
         """Execute a user task through the agentic loop.
 
         Send input -> LLM responds -> execute tools -> feed back -> summary.
+        If the LLM doesn't use tool calls, gently reinforce the expected format.
         Returns summary text or None.
         """
         self.cancelled = False
@@ -341,8 +385,55 @@ class CodeAgent:
         # Check for tool calls
         tool_calls = self.extract_tool_calls(result.content)
         if not tool_calls:
-            # Plain text response - print clean
-            self.print_clean_response(result.content)
+            # Plain text response — check if action words suggest tool use was intended
+            lower = result.content.lower()
+            wants_action = any(
+                w in lower for w in ["run", "execute", "create", "write", "edit",
+                                     "search", "install", "list files", "show file"]
+            )
+            if wants_action and len(result.content.split()) < 200:
+                # Suppress the first print — try to reinforce tool format first
+                reinforcement = (
+                    "To perform actions, use the <tool_call> wrapper. "
+                    "For example:\n"
+                    '<tool_call>{"name": "execute_command", "args": {"command": "ls"}}</tool_call>\n'
+                    "Try again with proper tool calls."
+                )
+                self.history.append({"role": "user", "content": reinforcement})
+
+                next_result = self.providers.chat(self.history)
+                if next_result.success:
+                    self.history.append({
+                        "role": "assistant", "content": next_result.content
+                    })
+                    self._trim_history()
+                    self._trim_by_tokens()
+
+                    tool_calls = self.extract_tool_calls(next_result.content)
+                    if tool_calls:
+                        # Only show the tool-called response
+                        first_call = next_result.content.find('<tool_call>')
+                        if first_call >= 0:
+                            before_tools = next_result.content[:first_call].strip()
+                            if before_tools:
+                                before_clean = self.strip_tool_tags(before_tools)
+                                if before_clean:
+                                    print(f"\n{before_clean}")
+                        return self._process_response(next_result.content)
+                    else:
+                        # Still no tool calls — print original response, show hint
+                        self.print_clean_response(result.content)
+                        self.display.info(
+                            "Tip: Use :model <name> to switch to a model better at tool use, "
+                            "or check your Ollama model supports instruction following."
+                        )
+                else:
+                    # Provider error — print original response
+                    self.print_clean_response(result.content)
+            else:
+                # Pure conversational — just print
+                self.print_clean_response(result.content)
+
             return None
 
         # Print text before first tool call

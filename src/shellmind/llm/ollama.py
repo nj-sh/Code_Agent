@@ -2,6 +2,7 @@
 Ollama LLM provider for ShellMind.
 
 Communicates with a local Ollama server via its REST API.
+Handles both NDJSON and SSE-prefixed streaming responses.
 """
 
 import json
@@ -11,6 +12,24 @@ import urllib.request
 
 from shellmind.config import OLLAMA_URL, LLM_TIMEOUT, LLM_MAX_RETRIES, LLM_TEMPERATURE
 from shellmind.llm.base import BaseLLMProvider, LLMResult
+
+def _parse_stream_line(raw: bytes) -> str:
+    """Parse a single line from an Ollama streaming response.
+
+    Handles both pure NDJSON and SSE-formatted lines (with `data: ` prefix).
+    Returns the content string, or empty string on failure.
+    """
+    try:
+        line = raw.decode().strip()
+        if not line:
+            return ""
+        # Strip SSE `data: ` prefix if present (some Ollama versions/proxies use it)
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        chunk = json.loads(line)
+        return chunk.get("message", {}).get("content", "")
+    except (json.JSONDecodeError, KeyError, UnicodeDecodeError):
+        return ""
 
 
 class OllamaProvider(BaseLLMProvider):
@@ -70,12 +89,8 @@ class OllamaProvider(BaseLLMProvider):
         for attempt in range(LLM_MAX_RETRIES):
             try:
                 with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
-                    for line in resp:
-                        try:
-                            chunk = json.loads(line.decode())
-                            content = chunk.get("message", {}).get("content", "")
-                        except (json.JSONDecodeError, KeyError):
-                            continue
+                    for raw_line in resp:
+                        content = _parse_stream_line(raw_line)
                         if content:
                             full_content += content
                             tokens_out += 1
@@ -89,6 +104,39 @@ class OllamaProvider(BaseLLMProvider):
                         tokens_out=tokens_out,
                         duration=time.time() - t0,
                     )
+
+                # Empty response — try non-streaming fallback
+                data_no_stream = json.dumps({
+                    "model": self._model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {"temperature": temperature},
+                }).encode()
+                req_no_stream = urllib.request.Request(
+                    self.url,
+                    data=data_no_stream,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req_no_stream, timeout=LLM_TIMEOUT) as resp:
+                    body = json.loads(resp.read())
+                content = body.get("message", {}).get("content", "")
+                if content:
+                    return LLMResult(
+                        success=True,
+                        content=content,
+                        provider=self.name,
+                        model=self._model,
+                        tokens_out=len(content.split()),
+                        duration=time.time() - t0,
+                    )
+
+                return LLMResult(
+                    success=False,
+                    content="Ollama returned empty content.",
+                    provider=self.name,
+                    model=self._model,
+                    duration=time.time() - t0,
+                )
 
             except urllib.error.HTTPError as http_err:
                 body = http_err.read().decode()
