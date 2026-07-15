@@ -6,6 +6,7 @@ __pycache__/
 dist/
 build/
 *.egg
+*.so
 
 # ─── Virtual environments ──────────────────────────────────
 .venv/
@@ -14,10 +15,9 @@ env/
 .virtualenvs/
 
 # ─── Session memory (auto-generated, user-specific) ────────
-# memory.json is created automatically on first run.
-# It contains your conversation history and model selection.
-# Keep it local — do NOT commit it.
 memory.json
+# User config directory
+.shellmind/
 
 # ─── IDE / Editor ──────────────────────────────────────────
 .vscode/
@@ -27,3 +27,13 @@ memory.json
 *~
 .DS_Store
 Thumbs.db
+
+# ─── Testing ──────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ─── Backups ──────────────────────────────────────────────
+*-backup/
+backup-*/
