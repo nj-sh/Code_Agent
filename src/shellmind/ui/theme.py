@@ -66,9 +66,29 @@ class Theme:
         )
 
     @classmethod
+    def plain(cls) -> "Theme":
+        """Plain theme — ASCII only, basic ANSI colors.
+
+        Perfect for Termux, SSH, serial consoles, or any terminal
+        that doesn't support 256-color or box-drawing characters.
+        Uses only the 8 standard ANSI colors and ASCII borders.
+        """
+        return cls(
+            name="plain",
+            accent="\033[1m\033[34m",   # Bold Blue
+            success="\033[1m\033[32m",  # Bold Green
+            warning="\033[1m\033[33m",  # Bold Yellow
+            error="\033[1m\033[31m",    # Bold Red
+            muted="\033[37m",            # White (falls back to terminal default on black bg)
+            line="",                      # No border color
+            think="\033[36m",            # Cyan
+            token="\033[1m\033[34m",    # Bold Blue
+        )
+
+    @classmethod
     def from_name(cls, name: str) -> "Theme":
         """Get a theme by name. Falls back to dark."""
-        return {"dark": cls.dark(), "light": cls.light()}.get(name.lower(), cls.dark())
+        return {"dark": cls.dark(), "light": cls.light(), "plain": cls.plain()}.get(name.lower(), cls.dark())
 
 
 # Active theme singleton
@@ -90,4 +110,9 @@ def set_active(theme: Theme | str) -> None:
 
 def available_themes() -> list[str]:
     """List available theme names."""
-    return ["dark", "light"]
+    return ["dark", "light", "plain"]
+
+
+def is_plain() -> bool:
+    """Check if the active theme is the plain/ASCII theme."""
+    return get_active().name == "plain"

@@ -26,6 +26,7 @@ from shellmind.memory import Memory
 from shellmind.ui.theme import get_active, set_active, available_themes
 from shellmind.ui.display import Display
 from shellmind.ui.prompt import Prompt
+from shellmind.llm.base import LLMResult
 from shellmind.llm.model_registry import ProviderRegistry
 from shellmind.tools.base import ToolResult
 from shellmind.tools.registry import ToolRegistry
@@ -53,6 +54,10 @@ class CodeAgent:
     )
     SUMMARY_RE = re.compile(
         r'<summary>(.*?)</summary>', re.DOTALL
+    )
+    # Match "ShellMind Req_Success" marker (case-insensitive)
+    REQ_SUCCESS_RE = re.compile(
+        r'ShellMind\s+Req_Success', re.IGNORECASE
     )
     # Match bullet-list plans like "- step 1\n- step 2" inside think blocks
     PLAN_ITEM_RE = re.compile(r'^[\-\*\d+\.\s]\s*(.+)$', re.MULTILINE)
@@ -111,50 +116,55 @@ class CodeAgent:
 
     @property
     def _system_prompt(self) -> str:
-        """Build the system prompt with current context."""
+        """Build the system prompt with current context.
+
+        Optimized for small/tiny models (1.5B-7B). Short, direct,
+        with clear examples and minimal fluff.
+        Supports both <summary> tag and 'ShellMind Req_Success' marker.
+        """
         return (
-            "You are ShellMind - a cross-platform terminal coding assistant.\n"
+            "You are ShellMind -- an AI inside the user's terminal.\n"
+            "You can run ANY command directly. NEVER suggest commands.\n"
             "\n"
-            "## CRITICAL RULES\n"
-            "1. USE TOOLS to do work. NEVER just describe what you would do.\n"
-            "2. START every task with a `think` tool call to plan your steps.\n"
-            "3. Execute ONE tool at a time, wait for its result, then continue.\n"
-            "4. ALWAYS show the output/data to the user before summarizing.\n"
-            "5. When done, wrap a <summary>...</summary> around your final message.\n"
-            "6. NEVER ask for credentials or personal info.\n"
+            "## WORKFLOW\n"
+            "1. Think out loud -- say what you need to do\n"
+            "2. Call ONE tool -- wait for the result\n"
+            "3. Read the result -- say what you see\n"
+            "4. Repeat until done\n"
+            "5. Output 'ShellMind Req_Success' at the END when finished\n"
             "\n"
-            "## Tool Format (EXACTLY this, one per <tool_call> block)\n"
-            "ALWAYS use this format - put the ENTIRE JSON on ONE LINE:\n"
+            "## TOOL FORMAT\n"
+            "Put the ENTIRE JSON on ONE LINE inside <tool_call> tags:\n"
             '<tool_call>{"name": "tool_name", "args": {"arg": "value"}}</tool_call>\n'
             "\n"
-            "## Available Tools\n"
-            "- **think**: Plan your approach. Args: `thought`\n"
-            "- **execute_command**: Run a shell command. Args: `command`\n"
-            "- **execute_file**: Run a script file. Args: `path`\n"
-            "- **read_file**: Read a file. Args: `path`\n"
-            "- **write_file**: Create/overwrite file. Args: `path`, `content`\n"
-            "- **edit_file**: Replace text in a file. Args: `path`, `old_string`, `new_string`\n"
-            "- **search_code**: Search files for a pattern. Args: `pattern`, `path`\n"
-            "- **git_status**: Show git working tree status\n"
-            "- **git_log**: Show git commit history. Args: `count`\n"
-            "- **git_diff**: Show git diff. Args: `staged`, `path`\n"
-            "- **git_commit**: Create a git commit. Args: `message`, `add_all`\n"
-            "- **git_branch**: List/create/delete branches. Args: `create`, `delete`\n"
-            "- **copy_file**: Copy a file. Args: `source`, `destination`\n"
-            "- **move_file**: Move a file. Args: `source`, `destination`\n"
-            "- **diff_files**: Diff two files. Args: `file1`, `file2`\n"
-            "- **pkg_install**: Install packages. Args: `packages`, `manager`\n"
-            "- **shell_send**: Send command to persistent shell. Args: `command`\n"
-            "- **shell_close**: Close persistent shell session\n"
-            "- **cd**: Change directory with fuzzy matching. Args: `path`\n"
+            "## AVAILABLE TOOLS\n"
+            "- think: Plan steps. Args: {thought}\n"
+            "- execute_command: Run any shell command. Args: {command}\n"
+            "- execute_file: Run a script file. Args: {path}\n"
+            "- read_file: Read a file. Args: {path}\n"
+            "- write_file: Create/overwrite file. Args: {path, content}\n"
+            "- edit_file: Replace text in a file. Args: {path, old_string, new_string}\n"
+            "- search_code: Search files for a pattern. Args: {pattern, path}\n"
+            "- cd: Change directory with fuzzy matching. Args: {path}\n"
+            "- git_status, git_log, git_diff, git_commit, git_branch\n"
+            "- copy_file, move_file, diff_files\n"
+            "- pkg_install, shell_send, shell_close\n"
             "\n"
-            "## Example session\n"
-            "User: list the files in /tmp\n"
-            'Assistant: <tool_call>{"name": "think", "args": {"thought": "User wants to list /tmp. I will run ls and show the result."}}</tool_call>\n'
-            "User: Result of think: ...\n"
-            'Assistant: <tool_call>{"name": "execute_command", "args": {"command": "ls -la /tmp"}}</tool_call>\n'
-            "User: Result of execute_command: ...\n"
-            "Assistant: Here are the files:\n...\n<summary>Listed /tmp directory with {count} files.</summary>\n"
+            "## EXAMPLE\n"
+            'User: "list files"\n'
+            'You: I need to list the files in the current directory.\n'
+            '<tool_call>{"name": "execute_command", "args": {"command": "ls -la"}}</tool_call>\n'
+            '[system shows you the result]\n'
+            'You: I can see the files. Done.\n'
+            'ShellMind Req_Success\n'
+            "\n"
+            "## RULES\n"
+            "- YOU are inside the computer. Run commands yourself.\n"
+            "- NEVER say 'you can run' or 'try running'. JUST RUN IT.\n"
+            "- Call ONE tool at a time. Wait for result.\n"
+            "- ALWAYS show the output/data to the user before finishing.\n"
+            "- End with: ShellMind Req_Success (exact, no extra spaces)\n"
+            "- Never ask for credentials or personal info.\n"
         )
 
     def _init_history(self) -> None:
@@ -282,7 +292,6 @@ class CodeAgent:
                 if isinstance(obj, dict) and "name" in obj:
                     calls.append(obj)
             except json.JSONDecodeError:
-                # Try to find JSON even without proper tags
                 continue
 
         # If no tagged calls found, try to find bare JSON tool objects
@@ -329,6 +338,10 @@ class CodeAgent:
         match = self.SUMMARY_RE.search(text)
         return match.group(1).strip() if match else None
 
+    def has_req_success(self, text: str) -> bool:
+        """Check if the response contains the 'ShellMind Req_Success' marker."""
+        return bool(self.REQ_SUCCESS_RE.search(text))
+
     def extract_plan_steps(self, thought: str) -> list[str]:
         """Extract bullet-point plan steps from a think block."""
         steps = []
@@ -342,15 +355,20 @@ class CodeAgent:
         return steps
 
     def strip_tool_tags(self, text: str) -> str:
-        """Remove tool call and summary tags, leaving readable text."""
+        """Remove tool call, summary, and Req_Success tags, leaving readable text."""
         text = self.TOOL_CALL_RE.sub("", text)
         text = self.SUMMARY_RE.sub("", text)
+        text = self.REQ_SUCCESS_RE.sub("", text)
         return text.strip()
 
     # ─── Main Execution Loop ──────────────────────────────────────────
 
     def print_clean_response(self, text: str) -> None:
-        """Print LLM response text with control tags stripped."""
+        """Print LLM response text with control tags stripped.
+
+        Shows the raw thinking so users can see
+        the model-wrapper conversation naturally.
+        """
         clean = self.strip_tool_tags(text)
         if clean:
             print(f"\n{clean}")
@@ -361,6 +379,9 @@ class CodeAgent:
         Send input -> LLM responds -> execute tools -> feed back -> summary.
         If the LLM doesn't use tool calls, gently reinforce the expected format.
         Returns summary text or None.
+
+        For tiny models: shows the natural model↔wrapper conversation,
+        and detects 'ShellMind Req_Success' to show filtered results.
         """
         self.cancelled = False
         self.display.reset_progress()
@@ -377,79 +398,94 @@ class CodeAgent:
         self._trim_history()
         self._trim_by_tokens()
 
-        # Check for summary first
+        # Check for tool calls FIRST (model may do work then signal done)
+        tool_calls = self.extract_tool_calls(result.content)
+        if tool_calls:
+            # Print text before first tool call
+            first_call = result.content.find('<tool_call>')
+            if first_call >= 0:
+                before_tools = result.content[:first_call].strip()
+                if before_tools:
+                    before_clean = self.strip_tool_tags(before_tools)
+                    if before_clean:
+                        print(f"\n{before_clean}")
+
+            summary = self._process_response(result.content)
+            if summary is not None:
+                return summary
+
+            # After processing all tool calls, check for Req_Success in original response
+            if self.has_req_success(result.content):
+                return self._build_req_summary(result)
+            return None
+
+        # Check for "ShellMind Req_Success" marker (no tools, just thinking + done)
+        if self.has_req_success(result.content):
+            before_marker = self.REQ_SUCCESS_RE.split(result.content)[0].strip()
+            if before_marker:
+                self.print_clean_response(before_marker)
+            return self._build_req_summary(result)
+
+        # Check for summary tag
         summary = self.extract_summary(result.content)
         if summary:
             return summary
 
-        # Check for tool calls
-        tool_calls = self.extract_tool_calls(result.content)
-        if not tool_calls:
-            # Plain text response — check if action words suggest tool use was intended
-            lower = result.content.lower()
-            wants_action = any(
-                w in lower for w in ["run", "execute", "create", "write", "edit",
-                                     "search", "install", "list files", "show file"]
+        # Plain text — check if action words suggest tool use was intended
+        lower = result.content.lower()
+        wants_action = any(
+            w in lower for w in ["run", "execute", "create", "write", "edit",
+                                 "search", "install", "list files", "show file"]
+        )
+        if wants_action and len(result.content.split()) < 200:
+            # Gently reinforce tool format for tiny models
+            reinforcement = (
+                "To perform actions, use the <tool_call> wrapper. "
+                "For example:\n"
+                '<tool_call>{"name": "execute_command", "args": {"command": "ls"}}</tool_call>\n'
+                "Try again with proper tool calls."
             )
-            if wants_action and len(result.content.split()) < 200:
-                # Suppress the first print — try to reinforce tool format first
-                reinforcement = (
-                    "To perform actions, use the <tool_call> wrapper. "
-                    "For example:\n"
-                    '<tool_call>{"name": "execute_command", "args": {"command": "ls"}}</tool_call>\n'
-                    "Try again with proper tool calls."
-                )
-                self.history.append({"role": "user", "content": reinforcement})
+            self.history.append({"role": "user", "content": reinforcement})
 
-                next_result = self.providers.chat(self.history)
-                if next_result.success:
-                    self.history.append({
-                        "role": "assistant", "content": next_result.content
-                    })
-                    self._trim_history()
-                    self._trim_by_tokens()
+            next_result = self.providers.chat(self.history)
+            if next_result.success:
+                self.history.append({
+                    "role": "assistant", "content": next_result.content
+                })
+                self._trim_history()
+                self._trim_by_tokens()
 
-                    tool_calls = self.extract_tool_calls(next_result.content)
-                    if tool_calls:
-                        # Only show the tool-called response
-                        first_call = next_result.content.find('<tool_call>')
-                        if first_call >= 0:
-                            before_tools = next_result.content[:first_call].strip()
-                            if before_tools:
-                                before_clean = self.strip_tool_tags(before_tools)
-                                if before_clean:
-                                    print(f"\n{before_clean}")
-                        return self._process_response(next_result.content)
-                    else:
-                        # Still no tool calls — print original response, show hint
-                        self.print_clean_response(result.content)
-                        self.display.info(
-                            "Tip: Use :model <name> to switch to a model better at tool use, "
-                            "or check your Ollama model supports instruction following."
-                        )
+                tool_calls = self.extract_tool_calls(next_result.content)
+                if tool_calls:
+                    first_call = next_result.content.find('<tool_call>')
+                    if first_call >= 0:
+                        before_tools = next_result.content[:first_call].strip()
+                        if before_tools:
+                            before_clean = self.strip_tool_tags(before_tools)
+                            if before_clean:
+                                print(f"\n{before_clean}")
+                    return self._process_response(next_result.content)
                 else:
-                    # Provider error — print original response
                     self.print_clean_response(result.content)
+                    self.display.info(
+                        "Tip: Use :model <name> to switch to a model better at tool use, "
+                        "or check your Ollama model supports instruction following."
+                    )
             else:
-                # Pure conversational — just print
                 self.print_clean_response(result.content)
+        else:
+            # Pure conversational — just print
+            self.print_clean_response(result.content)
 
-            return None
-
-        # Print text before first tool call
-        clean = self.strip_tool_tags(result.content)
-        first_call = result.content.find('<tool_call>')
-        if first_call >= 0:
-            before_tools = result.content[:first_call].strip()
-            if before_tools:
-                before_clean = self.strip_tool_tags(before_tools)
-                if before_clean:
-                    print(f"\n{before_clean}")
-
-        return self._process_response(result.content)
+        return None
 
     def _process_response(self, response: str) -> Optional[str]:
-        """Process tool calls from an LLM response recursively."""
+        """Process tool calls from an LLM response recursively.
+
+        Shows the natural model↔wrapper conversation: model thinks,
+        wrapper executes, model sees results, model decides next step.
+        Detects 'ShellMind Req_Success' as completion signal.
+        """
         tool_calls = self.extract_tool_calls(response)
         if not tool_calls:
             return None
@@ -538,6 +574,15 @@ class CodeAgent:
             self._trim_history()
             self._trim_by_tokens()
 
+            # Check for Req_Success in the next response (model signals completion)
+            if self.has_req_success(next_result.content):
+                # Print any text before the marker
+                before_marker = self.REQ_SUCCESS_RE.split(next_result.content)[0].strip()
+                clean_before = self.strip_tool_tags(before_marker)
+                if clean_before:
+                    print(f"\n{clean_before}")
+                return self._build_req_summary_from_history()
+
             # Recursively process
             sub_result = self._process_response(next_result.content)
             if sub_result is not None:
@@ -545,7 +590,85 @@ class CodeAgent:
 
             step_index += 1
 
+        # After all tool calls processed, check for Req_Success marker
+        if self.has_req_success(response):
+            return self._build_req_summary_from_history()
+
         return None
+
+    def _build_req_summary(self, llm_result: LLMResult) -> Optional[str]:
+        """Build a filtered summary when 'ShellMind Req_Success' is detected.
+
+        Shows commands executed, tokens, time, and changes in a clean format.
+        The returned string is displayed by _run_and_show -> display.summary().
+        """
+        tokens_out = llm_result.tokens_out or 0
+        duration = llm_result.duration or 0.0
+
+        # Build summary from results log
+        commands = []
+        changes = []
+        for r in self.results_log:
+            if r.tool == "execute_command":
+                cmd = r.args.get("command", "")
+                if cmd:
+                    commands.append(cmd)
+            if r.success and r.tool in ("write_file", "edit_file", "copy_file", "move_file"):
+                changes.append(r.output)
+
+        # Build display string (shown by _run_and_show -> display.summary())
+        parts = []
+        if changes:
+            for c in changes[:2]:
+                parts.append(f"  \u2022 {c}")
+            if len(changes) > 2:
+                parts.append(f"  \u2022 ... and {len(changes) - 2} more")
+        if commands:
+            for cmd in commands[:2]:
+                parts.append(f"  $ {cmd}")
+            if len(commands) > 2:
+                parts.append(f"  ... and {len(commands) - 2} more")
+
+        meta = []
+        if tokens_out:
+            meta.append(f"{tokens_out} tokens")
+        if duration:
+            meta.append(f"{duration:.1f}s")
+        if meta:
+            parts.append(f"  ({', '.join(meta)})")
+
+        return "\n".join(parts) if parts else "Done."
+
+    def _build_req_summary_from_history(self) -> Optional[str]:
+        """Build filtered summary using last assistant response from history.
+
+        Called when Req_Success is detected mid-process (not in initial response).
+        """
+        # Find the last assistant message
+        last_assistant = None
+        for msg in reversed(self.history):
+            if msg["role"] == "assistant":
+                last_assistant = msg
+                break
+
+        if last_assistant is None:
+            return None
+
+        # Simulate an LLMResult with the last response
+        content = last_assistant.get("content", "")
+        tokens_est = len(content.split())
+
+        from shellmind.llm.base import LLMResult
+        dummy_result = LLMResult(
+            success=True,
+            content=content,
+            provider=self.providers.active_name,
+            model=self.model,
+            tokens_in=0,
+            tokens_out=tokens_est,
+            duration=0.0,
+        )
+        return self._build_req_summary(dummy_result)
 
     # ─── Direct Commands ──────────────────────────────────────────────
 
