@@ -419,36 +419,44 @@ class CodeAgent:
                 return self._build_req_summary(result)
             return None
 
-        # Check for "ShellMind Req_Success" marker (no tools, just thinking + done)
-        if self.has_req_success(result.content):
-            before_marker = self.REQ_SUCCESS_RE.split(result.content)[0].strip()
-            if before_marker:
-                self.print_clean_response(before_marker)
-            return self._build_req_summary(result)
-
-        # Check for summary tag
-        summary = self.extract_summary(result.content)
-        if summary:
-            return summary
-
-        # Plain text — check if action words suggest tool use was intended
+        # Check if response is task-related but lacks tool calls
+        # Requires at least 2 signals to avoid false positives on casual chat
         lower = result.content.lower()
-        wants_action = any(
-            w in lower for w in ["run", "execute", "create", "write", "edit",
-                                 "search", "install", "list files", "show file"]
-        )
-        if wants_action and len(result.content.split()) < 200:
-            # Gently reinforce tool format for tiny models
+        has_marker = self.has_req_success(result.content) or bool(self.extract_summary(result.content))
+        has_action_words = any(w in lower for w in [
+            "run", "execute", "create", "write", "edit",
+            "search", "install", "list", "the files", "the directory",
+        ])
+        is_task_response = has_marker or (has_action_words and len(result.content.split()) < 200)
+
+        if is_task_response:
+            # Model described work without doing it — reinforce tool use
+            # Show just the first line of thinking
+            before_tags = self.strip_tool_tags(result.content)
+            first_thought = ""
+            if before_tags:
+                lines = before_tags.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line and len(line) > 3:
+                        first_thought = line
+                        break
+            if first_thought:
+                print(f"\n  {get_active().think}{first_thought}{get_active().reset}")
+
+            # Strong but concise reinforcement with example
             reinforcement = (
-                "To perform actions, use the <tool_call> wrapper. "
-                "For example:\n"
-                '<tool_call>{"name": "execute_command", "args": {"command": "ls"}}</tool_call>\n'
-                "Try again with proper tool calls."
+                "Use the <tool_call> wrapper to run commands.\n"
+                "Example: <tool_call>{\"name\": \"execute_command\", \"args\": {\"command\": \"ls -la\"}}</tool_call>\n"
+                "Try again."
             )
+
+            # Trim history before adding reinforcement to keep context clean
+            self._trim_history()
             self.history.append({"role": "user", "content": reinforcement})
 
             next_result = self.providers.chat(self.history)
-            if next_result.success:
+            if next_result and next_result.success:
                 self.history.append({
                     "role": "assistant", "content": next_result.content
                 })
@@ -466,17 +474,17 @@ class CodeAgent:
                                 print(f"\n{before_clean}")
                     return self._process_response(next_result.content)
                 else:
-                    self.print_clean_response(result.content)
-                    self.display.info(
-                        "Tip: Use :model <name> to switch to a model better at tool use, "
-                        "or check your Ollama model supports instruction following."
+                    self.display.warning(
+                        "This model doesn't support tool calling. "
+                        "Try: :model qwen2.5-coder:7b or deepseek-coder:6.7b"
                     )
+                    self.print_clean_response(result.content)
             else:
                 self.print_clean_response(result.content)
-        else:
-            # Pure conversational — just print
-            self.print_clean_response(result.content)
+            return None
 
+        # Pure conversational — just print
+        self.print_clean_response(result.content)
         return None
 
     def _process_response(self, response: str) -> Optional[str]:
