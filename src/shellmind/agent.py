@@ -474,10 +474,8 @@ class CodeAgent:
                                 print(f"\n{before_clean}")
                     return self._process_response(next_result.content)
                 else:
-                    self.display.warning(
-                        "This model doesn't support tool calling. "
-                        "Try: :model qwen2.5-coder:7b or deepseek-coder:6.7b"
-                    )
+                    # Tiny model didn't use tools even after reinforcement.
+                    # That's OK — just show what it said.
                     self.print_clean_response(result.content)
             else:
                 self.print_clean_response(result.content)
