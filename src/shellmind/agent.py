@@ -620,9 +620,9 @@ class CodeAgent:
         parts = []
         if changes:
             for c in changes[:2]:
-                parts.append(f"  \u2022 {c}")
+                parts.append(f"  • {c}")
             if len(changes) > 2:
-                parts.append(f"  \u2022 ... and {len(changes) - 2} more")
+                parts.append(f"  • ... and {len(changes) - 2} more")
         if commands:
             for cmd in commands[:2]:
                 parts.append(f"  $ {cmd}")
